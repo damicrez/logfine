@@ -61,8 +61,11 @@ cargo build --release
 It's kinda self-explainatory, but...
 
 **logbook_path**: Stores a sqlite database with the tasks and log data, you can check it by yourself.
+
 **todo_path**: It should contain your todo.txt file, so logfine can register your completed and non-completed tasks.
+
 **mvos**: Is a list of strings with the *Minimum Viable Output* of your day, so you can keep track of it everyday.
+
 **delete_tasks**: A true|false configuration variable to delete or no delete the completed tasks in your todo.txt file.
 
 ### Example
