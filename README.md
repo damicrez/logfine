@@ -33,7 +33,7 @@ This is the cleanest way to install the CLI. It compiles the binary in release m
 
 ```bash
 # Clone the repository
-git clone [https://github.com/damicrez/logfine.git](https://github.com/damicrez/logfine.git)
+git clone https://github.com/damicrez/logfine.git
 cd logfine
 
 # Build and install the binary locally
