@@ -13,7 +13,7 @@ A CLI logger designed to generate structured data (JSON) perfect for AI analysis
 I use this tool to ask GPT for patterns, low leverage tasks, misalignment between my effort and output...
 You can use the JSON file for charts and see progress.
 
-[ProgramFlow](./Program Flow.gif) 
+![Program Flow](https://github.com/damicrez/logfine/blob/main/flowexample.gif)
 
 ## Installation
 
