@@ -57,6 +57,7 @@ cargo build --release
 ```
 
 ## Configuration
+It should be located at ~/.config/logfine/logfine.toml
 
 It's kinda self-explainatory, but...
 
