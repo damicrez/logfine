@@ -20,7 +20,7 @@ use regex::Regex;
 
 use crate::models::{LogDb, NewLogDb, NewTaskDb, TodoCacheDb, TaskDb};
 
-/// Command-line interface arguments parsed via Clap
+/// Built in Rust, logfine is a CLI tool to keep track of your days.
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct CliArgs {
@@ -100,17 +100,19 @@ fn load_config() -> Result<Config> {
                     fs::create_dir_all(parent)?;
                 }
 
-                let mut default_config = Config::default();
-                default_config.mvos = vec![
-                    "Read one chapter of a book".to_string(),
-                    "Do some exercise".to_string(),
-                    "One push commit to GitHub".to_string(),
-                ];
+                let default_config = Config {
+                    mvos: vec![
+                        "Read one chapter of a book".to_string(),
+                        "Do some exercise".to_string(),
+                        "One push commit to GitHub".to_string(),
+                    ],
+                    ..Default::default()
+                };
                 
                 let default_content = toml::to_string(&default_config)?;
                 fs::write(&path, default_content)?;
                 
-                println!("Check your database at {:?} using sqlite or execute \"logfine export\" to get your data in JSON", default_config.logbook_path);
+                println!("Database file created at {:?}", default_config.logbook_path);
                 Ok(default_config)
             } else {
                 Err(err.into())
@@ -131,8 +133,10 @@ fn prompt_energy_state(default_val: u8) -> Result<u8> {
             Err("Value must be between 1 and 3".into())
         }
     };
-    let energy = CustomType::<u8>::new("Today's energy state (1-3, Low-High)")
+    let energy = CustomType::<u8>::new("Today's energy state")
         .with_validator(validator)
+        .with_error_message("Please type a number from 1 to 3")
+        .with_help_message("1-3, Low-High")
         .with_default(default_val)
         .prompt()?;
     Ok(energy)
@@ -143,6 +147,8 @@ fn prompt_mvo_items(items: &[String], existing_mvos: &[String]) -> Result<Vec<St
     let default_indices: Vec<usize> = items.iter().enumerate().filter(|(_,item)| existing_mvos.contains(item)).map(|(idx, _)| idx).collect();
     let checked = MultiSelect::new("Today's minimum viable output", items.to_vec())
         .with_default(&default_indices)
+        .with_vim_mode(true)
+        .without_help_message()
         .prompt()?;
     Ok(checked)
 }
@@ -746,7 +752,6 @@ fn main() -> Result<()> {
 
     if app_config.delete_tasks {
         delete_completed_tasks(&app_config.todo_path)?;
-        println!("Completed tasks removed from todo file.");
     }
 
     if !sync_only {
@@ -776,6 +781,6 @@ fn main() -> Result<()> {
             .execute(&mut db_connection)?;
     }
 
-    println!("Finished.");
+    println!("Done.");
     Ok(())
 }
