@@ -59,13 +59,15 @@ pub struct Task {
 
 /// Configuration settings
 #[derive(Debug, Serialize, Deserialize)]
-struct Config {
+pub struct Config {
     logbook_path: PathBuf,
     todo_path: PathBuf,
     #[serde(default)]
     mvos: Vec<String>,
     #[serde(default)]
     delete_tasks: bool,
+    #[serde(default)]
+    automatic_completion_date: bool,
 }
 
 impl Default for Config {
@@ -78,6 +80,7 @@ impl Default for Config {
             todo_path,
             mvos: Vec::new(),
             delete_tasks: false,
+            automatic_completion_date: false,
         }
     }
 }
@@ -305,10 +308,11 @@ pub enum TaskAction {
 
 /// Synchronizes the todo.txt file with the state stored in the SQLite database cache
 pub fn cache_sync(
-    todo_path: &Path,
+    app_config: &Config,
     db_connection: &mut SqliteConnection,
 ) -> Result<Vec<TaskAction>> {
     use crate::schema::todo_cache::dsl::*;
+    let todo_path = &app_config.todo_path;
 
     // 1. Load cache lines from SQLite database
     let cache_lines: HashSet<String> = todo_cache
@@ -340,12 +344,14 @@ pub fn cache_sync(
 
     let mut sync_actions = Vec::new();
     let mut lines_to_cache = Vec::new();
+    let mut file_rewrites = Vec::new();
     let mut matching_removed = missing_from_todo.clone();
 
     // 4. Analyze new lines (appearances)
-    for new_line in new_in_todo {
-        let Some(task) = parse_task(&new_line) else {
-            continue;
+    for mut new_line in new_in_todo {
+        let mut task = match parse_task(&new_line) {
+            Some(t) => t,
+            None => continue,
         };
 
         // Track line to be inserted into the cache database
@@ -381,6 +387,36 @@ pub fn cache_sync(
                     new_task: task,
                 });
             } else if !old_completed && new_completed {
+                let old_task = parse_task(&old_line).unwrap();
+                let needs_auto_date = if !app_config.automatic_completion_date {
+                    false
+                } else if old_task.creation_date.is_some() {
+                    task.completion_date == old_task.creation_date && task.creation_date.is_none()
+                } else {
+                    task.completion_date.is_none()
+                };
+
+                if needs_auto_date {
+                    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    let mut modified_new_raw = new_line.clone();
+                    if let Some(p) = task.priority {
+                        let prefix = format!("x ({}) ", p);
+                        let new_prefix = format!("x ({}) {} ", p, date_str);
+                        modified_new_raw = modified_new_raw.replacen(&prefix, &new_prefix, 1);
+                    } else {
+                        let prefix = "x ";
+                        let new_prefix = format!("x {} ", date_str);
+                        modified_new_raw = modified_new_raw.replacen(prefix, &new_prefix, 1);
+                    }
+                    
+                    file_rewrites.push((new_line.clone(), modified_new_raw.clone()));
+                    new_line = modified_new_raw;
+                    task = parse_task(&new_line).unwrap();
+                    if let Some(last) = lines_to_cache.last_mut() {
+                        *last = new_line.clone();
+                    }
+                }
+
                 sync_actions.push(TaskAction::Completed {
                     old_raw: old_line,
                     new_raw: new_line.clone(),
@@ -419,6 +455,33 @@ pub fn cache_sync(
         }
         Ok(())
     })?;
+
+    if !file_rewrites.is_empty() {
+        let file = File::open(todo_path)?;
+        let reader = BufReader::new(file);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            let mut l = line?;
+            for (old_raw, new_raw) in &file_rewrites {
+                if l == *old_raw {
+                    l = new_raw.clone();
+                    break;
+                }
+            }
+            lines.push(l);
+        }
+        let mut content = lines.join("\n");
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        let parent = todo_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_path = parent.join(format!(
+            ".{}.tmp",
+            todo_path.file_name().and_then(|n| n.to_str()).unwrap_or("todo")
+        ));
+        fs::write(&temp_path, content)?;
+        fs::rename(&temp_path, todo_path)?;
+    }
 
     Ok(sync_actions)
 }
@@ -645,7 +708,7 @@ fn main() -> Result<()> {
     let log = get_or_create_log(&mut db_connection, &formatted_date)?;
 
     // Synchronize todo tasks
-    let sync_actions = cache_sync(&app_config.todo_path, &mut db_connection)?;
+    let sync_actions = cache_sync(&app_config, &mut db_connection)?;
 
     // Collect user decisions for modified tasks first to avoid holding a transaction lock during prompts
     let mut resolved_actions = Vec::new();
