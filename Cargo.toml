@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 diesel = { version = "2.2.0", features = ["sqlite", "chrono", "returning_clauses_for_sqlite_3_35"] }
-diesel_migrations = "2.2.0"
+diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -18,3 +18,4 @@ clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0.103"
 toml = "1.1.2"
 regex = "1.12.4"
+anstyle = "1.0.14"

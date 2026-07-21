@@ -9,16 +9,24 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc, Local, NaiveDate};
 use edit::{Builder, edit_with_builder};
 use inquire::{CustomType, MultiSelect, Confirm};
+use inquire::validator::Validation;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use strsim::jaro_winkler;
 use diesel::prelude::*;
 use clap::{Parser, Subcommand};
+use anstyle::{AnsiColor, Color, Style, Reset};
 use anyhow::Result;
 use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::models::{LogDb, NewLogDb, NewTaskDb, TodoCacheDb, TaskDb};
+
+pub const STYLE_SUCCESS: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
+pub const STYLE_ERROR: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
+pub const STYLE_WARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
+pub const STYLE_INFO: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue)));
+pub const STYLE_RESET: Reset = Reset;
 
 /// Built in Rust, logfine is a CLI tool to keep track of your days.
 #[derive(Parser)]
@@ -30,7 +38,7 @@ struct CliArgs {
 
 #[derive(Subcommand)]
 enum CliCommands {
-    /// Synchronize completed tasks with the database cache
+    /// Synchronize tasks with the database cache without prompts
     Sync {
         /// Skip interactive prompts for typos and automatically accept updates
         #[arg(long)]
@@ -49,6 +57,7 @@ enum CliCommands {
 /// Represents a parsed todo.txt task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
+    pub description: String,
     pub priority: Option<char>,
     pub completion_date: Option<DateTime<Utc>>,
     pub creation_date: Option<DateTime<Utc>>,
@@ -98,7 +107,7 @@ fn load_config() -> Result<Config> {
         }
         Err(err) => {
             if err.kind() == io::ErrorKind::NotFound {
-                println!("Config file not found. Writing default config at: {:?}", path);
+                println!("{STYLE_INFO}Config file not found. Writing default config at:{STYLE_RESET} {:?}", path);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -115,7 +124,7 @@ fn load_config() -> Result<Config> {
                 let default_content = toml::to_string(&default_config)?;
                 fs::write(&path, default_content)?;
                 
-                println!("Database file created at {:?}", default_config.logbook_path);
+                println!("{STYLE_INFO}Database file created at:{STYLE_RESET} {:?}", default_config.logbook_path);
                 Ok(default_config)
             } else {
                 Err(err.into())
@@ -127,18 +136,18 @@ fn load_config() -> Result<Config> {
 /// Prompt the user to enter their energy state (1-3)
 fn prompt_energy_state(default_val: u8) -> Result<u8> {
     let validator = |val: &u8| -> Result<
-        inquire::validator::Validation,
+        Validation,
         Box<dyn std::error::Error + Send + Sync>,
     > {
         if (1..=3).contains(val) {
-            Ok(inquire::validator::Validation::Valid)
+            Ok(Validation::Valid)
         } else {
-            Err("Value must be between 1 and 3".into())
+            Ok(Validation::Invalid("Value must be between 1 and 3".into()))
         }
     };
     let energy = CustomType::<u8>::new("Today's energy state")
         .with_validator(validator)
-        .with_error_message("Please type a number from 1 to 3")
+        .with_error_message("Please type a valid number")
         .with_help_message("1-3, Low-High")
         .with_default(default_val)
         .prompt()?;
@@ -274,6 +283,7 @@ fn parse_task(line: &str) -> Option<Task> {
     }
 
     Some(Task {
+        description: description.to_string(),
         priority,
         completion_date,
         creation_date,
@@ -306,11 +316,18 @@ pub enum TaskAction {
     },
 }
 
+pub struct SyncState {
+    pub actions: Vec<TaskAction>,
+    pub cache_inserts: Vec<String>,
+    pub cache_deletes: Vec<String>,
+    pub file_rewrites: HashMap<String, String>,
+}
+
 /// Synchronizes the todo.txt file with the state stored in the SQLite database cache
 pub fn cache_sync(
     app_config: &Config,
     db_connection: &mut SqliteConnection,
-) -> Result<Vec<TaskAction>> {
+) -> Result<SyncState> {
     use crate::schema::todo_cache::dsl::*;
     let todo_path = &app_config.todo_path;
 
@@ -344,16 +361,14 @@ pub fn cache_sync(
 
     let mut sync_actions = Vec::new();
     let mut lines_to_cache = Vec::new();
-    let mut file_rewrites = Vec::new();
+    let mut file_rewrites = HashMap::new();
     let mut matching_removed = missing_from_todo.clone();
 
     // 4. Analyze new lines (appearances)
     for mut new_line in new_in_todo {
-        let mut task = match parse_task(&new_line) {
-            Some(t) => t,
-            None => continue,
+        let Some(mut task) = parse_task(&new_line) else {
+            continue;
         };
-
         // Track line to be inserted into the cache database
         lines_to_cache.push(new_line.clone());
 
@@ -363,8 +378,12 @@ pub fn cache_sync(
         let mut best_match_idx = None;
 
         for (idx, missing_line) in matching_removed.iter().enumerate() {
-            let score = jaro_winkler(&new_line, missing_line);
-            if score > 0.85 && score > highest_score {
+            let score = if let Some(missing_task) = parse_task(missing_line) {
+                jaro_winkler(&task.description, &missing_task.description)
+            } else {
+                jaro_winkler(&new_line, missing_line)
+            };
+            if score > 0.79 && score > highest_score {
                 highest_score = score;
                 best_match = Some(missing_line.clone());
                 best_match_idx = Some(idx);
@@ -387,7 +406,9 @@ pub fn cache_sync(
                     new_task: task,
                 });
             } else if !old_completed && new_completed {
-                let old_task = parse_task(&old_line).unwrap();
+                let Some(old_task) = parse_task(&old_line) else {
+                    continue;
+                };
                 let needs_auto_date = if !app_config.automatic_completion_date {
                     false
                 } else if old_task.creation_date.is_some() {
@@ -409,9 +430,9 @@ pub fn cache_sync(
                         modified_new_raw = modified_new_raw.replacen(prefix, &new_prefix, 1);
                     }
                     
-                    file_rewrites.push((new_line.clone(), modified_new_raw.clone()));
+                    file_rewrites.insert(new_line.clone(), modified_new_raw.clone());
                     new_line = modified_new_raw;
-                    task = parse_task(&new_line).unwrap();
+                    task = parse_task(&new_line).expect("Failed to parse newly modified task line");
                     if let Some(last) = lines_to_cache.last_mut() {
                         *last = new_line.clone();
                     }
@@ -437,53 +458,12 @@ pub fn cache_sync(
         }
     }
 
-    // 6. Save the updated state to the database todo_cache table inside a transaction
-    db_connection.transaction::<_, anyhow::Error, _>(|conn| {
-        if !missing_from_todo.is_empty() {
-            diesel::delete(todo_cache.filter(raw_line.eq_any(&missing_from_todo)))
-                .execute(conn)?;
-        }
-
-        if !lines_to_cache.is_empty() {
-            let inserts: Vec<TodoCacheDb> = lines_to_cache
-                .into_iter()
-                .map(|line| TodoCacheDb { raw_line: line })
-                .collect();
-            diesel::insert_into(todo_cache)
-                .values(&inserts)
-                .execute(conn)?;
-        }
-        Ok(())
-    })?;
-
-    if !file_rewrites.is_empty() {
-        let file = File::open(todo_path)?;
-        let reader = BufReader::new(file);
-        let mut lines = Vec::new();
-        for line in reader.lines() {
-            let mut l = line?;
-            for (old_raw, new_raw) in &file_rewrites {
-                if l == *old_raw {
-                    l = new_raw.clone();
-                    break;
-                }
-            }
-            lines.push(l);
-        }
-        let mut content = lines.join("\n");
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        let parent = todo_path.parent().unwrap_or_else(|| Path::new("."));
-        let temp_path = parent.join(format!(
-            ".{}.tmp",
-            todo_path.file_name().and_then(|n| n.to_str()).unwrap_or("todo")
-        ));
-        fs::write(&temp_path, content)?;
-        fs::rename(&temp_path, todo_path)?;
-    }
-
-    Ok(sync_actions)
+    Ok(SyncState {
+        actions: sync_actions,
+        cache_inserts: lines_to_cache,
+        cache_deletes: missing_from_todo,
+        file_rewrites,
+    })
 }
 
 /// Helper function to load or create today's daily log entry in the database
@@ -600,7 +580,6 @@ fn export_database_to_json(
     output_path: &Path,
 ) -> Result<()> {
     use crate::schema::logs::dsl::*;
-    use crate::schema::tasks::dsl::{tasks, log_id};
 
     // 1. Fetch log entries
     let log_entries = logs
@@ -609,21 +588,13 @@ fn export_database_to_json(
         .load::<LogDb>(db_connection)?;
 
     // 2. Fetch all tasks for these logs
-    let log_ids: Vec<i32> = log_entries.iter().map(|l| l.id).collect();
-    let task_entries = tasks
-        .filter(log_id.eq_any(&log_ids))
-        .load::<TaskDb>(db_connection)?;
-
-    // Group tasks by log_id
-    let mut tasks_by_log_id: HashMap<i32, Vec<TaskDb>> = HashMap::new();
-    for task in task_entries {
-        tasks_by_log_id.entry(task.log_id).or_default().push(task);
-    }
+    let task_entries = TaskDb::belonging_to(&log_entries)
+        .load::<TaskDb>(db_connection)?
+        .grouped_by(&log_entries);
 
     // 3. Construct ExportedLog list
     let mut exported_logs = Vec::new();
-    for log in log_entries {
-        let log_tasks = tasks_by_log_id.remove(&log.id).unwrap_or_default();
+    for (log, log_tasks) in log_entries.into_iter().zip(task_entries) {
         let exported_tasks: Vec<ExportedTask> = log_tasks
             .into_iter()
             .map(|t| {
@@ -682,7 +653,7 @@ fn main() -> Result<()> {
         });
 
         export_database_to_json(&mut db_connection, resolved_days, &output_path)?;
-        println!("Exported the last {} days to {:?}", resolved_days, output_path);
+        println!("{STYLE_INFO}Exported the last {} days to:{STYLE_RESET} {:?}", resolved_days, output_path);
         return Ok(());
     }
     
@@ -699,7 +670,8 @@ fn main() -> Result<()> {
     let app_config = load_config()?;
 
     // Establish DB connection & run migrations
-    if let Some(parent) = app_config.logbook_path.parent() {
+    fs::create_dir_all(&app_config.logbook_path)?;
+    if let Some(parent) = app_config.todo_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut db_connection = db::init_db(&app_config.logbook_path)?;
@@ -708,11 +680,11 @@ fn main() -> Result<()> {
     let log = get_or_create_log(&mut db_connection, &formatted_date)?;
 
     // Synchronize todo tasks
-    let sync_actions = cache_sync(&app_config, &mut db_connection)?;
+    let sync_state = cache_sync(&app_config, &mut db_connection)?;
 
     // Collect user decisions for modified tasks first to avoid holding a transaction lock during prompts
     let mut resolved_actions = Vec::new();
-    for action in sync_actions {
+    for action in sync_state.actions {
         match action {
             TaskAction::Added { raw_line, task } => {
                 resolved_actions.push((TaskAction::Added { raw_line, task }, false));
@@ -725,12 +697,12 @@ fn main() -> Result<()> {
             }
             TaskAction::Modified { old_raw, new_raw, new_task } => {
                 let is_typo = if skip_typos {
-                    println!("Auto-accepted typo for task: {}", new_raw);
+                    println!("{STYLE_INFO}Auto-accepted typo for task:{STYLE_RESET} {}", new_raw);
                     true
                 } else {
-                    println!("A possible modification/typo was detected:");
-                    println!("  Old: {}", old_raw);
-                    println!("  New: {}", new_raw);
+                    println!("{STYLE_INFO}A possible modification/typo was detected:{STYLE_RESET}");
+                    println!("  {STYLE_WARN}Old:{STYLE_RESET} {}", old_raw);
+                    println!("  {STYLE_SUCCESS}New:{STYLE_RESET} {}", new_raw);
                     Confirm::new("Was this a typo correction?")
                         .with_default(true)
                         .prompt()?
@@ -742,16 +714,27 @@ fn main() -> Result<()> {
 
     // Apply all updates in a single transaction
     db_connection.transaction::<_, anyhow::Error, _>(|conn| {
+        use crate::schema::todo_cache::dsl::*;
+        if !sync_state.cache_deletes.is_empty() {
+            diesel::delete(todo_cache.filter(raw_line.eq_any(&sync_state.cache_deletes)))
+                .execute(conn)?;
+        }
+        if !sync_state.cache_inserts.is_empty() {
+            let inserts: Vec<TodoCacheDb> = sync_state.cache_inserts
+                .into_iter()
+                .map(|line| TodoCacheDb { raw_line: line })
+                .collect();
+            diesel::insert_into(todo_cache)
+                .values(&inserts)
+                .execute(conn)?;
+        }
+
         for (action, is_typo) in resolved_actions {
             match action {
                 TaskAction::Added { raw_line: added_raw_line, task } => {
                     let is_completed_flag = added_raw_line.starts_with("x ");
                     insert_db_task(conn, log.id, &task, &added_raw_line, is_completed_flag)?;
-                    if is_completed_flag {
-                        println!("+ New completed task processed.");
-                    } else {
-                        println!("+ New uncompleted task processed.");
-                    }
+                    println!("{STYLE_WARN}+ New task processed:{STYLE_RESET} {}", added_raw_line);
                 }
                 TaskAction::Completed { old_raw, new_raw, new_task } => {
                     use crate::schema::tasks::dsl::*;
@@ -767,7 +750,7 @@ fn main() -> Result<()> {
                             is_completed.eq(true),
                         ))
                         .execute(conn)?;
-                    println!("✓ Task completed: {}", new_raw);
+                    println!("{STYLE_SUCCESS}✓ Task completed:{STYLE_RESET} {}", new_raw);
                 }
                 TaskAction::Reopened { old_raw, new_raw, new_task } => {
                     use crate::schema::tasks::dsl::*;
@@ -783,7 +766,7 @@ fn main() -> Result<()> {
                             is_completed.eq(false),
                         ))
                         .execute(conn)?;
-                    println!("↺ Task reopened: {}", new_raw);
+                    println!("{STYLE_WARN}↺ Task reopened:{STYLE_RESET} {}", new_raw);
                 }
                 TaskAction::Modified { old_raw, new_raw, new_task } => {
                     let is_completed_flag = new_raw.starts_with("x ");
@@ -802,16 +785,42 @@ fn main() -> Result<()> {
                                 is_completed.eq(is_completed_flag),
                             ))
                             .execute(conn)?;
-                        println!("~ Log updated.");
+                        println!("{STYLE_INFO}~ Log updated.{STYLE_RESET}");
                     } else {
                         insert_db_task(conn, log.id, &new_task, &new_raw, is_completed_flag)?;
-                        println!("+ Treated as a new task.");
+                        println!("{STYLE_INFO}+ Treated as a new task.{STYLE_RESET}");
                     }
                 }
             }
         }
         Ok(())
     })?;
+
+    if !sync_state.file_rewrites.is_empty() {
+        let file = File::open(&app_config.todo_path)?;
+        let reader = BufReader::new(file);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            let mut l = line?;
+            if let Some(new_raw) = sync_state.file_rewrites.get(&l) {
+                l = new_raw.clone();
+            }
+            lines.push(l);
+        }
+        let mut content = lines.join("\n");
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        let parent = app_config.todo_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_path = parent.join(format!(
+            ".{}.tmp",
+            app_config.todo_path.file_name().and_then(|n| n.to_str()).unwrap_or("todo")
+        ));
+        fs::write(&temp_path, content)?;
+        fs::rename(&temp_path, &app_config.todo_path)?;
+    }
+
+    println!("─────────────────────────────────");
 
     if app_config.delete_tasks {
         delete_completed_tasks(&app_config.todo_path)?;
@@ -842,8 +851,22 @@ fn main() -> Result<()> {
                 output.eq(serde_json::to_string(&output_items)?),
             ))
             .execute(&mut db_connection)?;
-    }
 
-    println!("Done.");
+        let (completed_today_count, remaining_count) = {
+            use crate::schema::tasks::dsl::*;
+            let comp: i64 = tasks
+                .filter(is_completed.eq(true))
+                .filter(completion_date.like(format!("{}%", formatted_date)))
+                .count()
+                .get_result(&mut db_connection)?;
+            let rem: i64 = tasks
+                .filter(is_completed.eq(false))
+                .count()
+                .get_result(&mut db_connection)?;
+            (comp, rem)
+        };
+
+        println!("{STYLE_SUCCESS}>{STYLE_RESET} Today's completed tasks {STYLE_SUCCESS}{}{STYLE_RESET}, remaining tasks {STYLE_WARN}{}{STYLE_RESET}", completed_today_count, remaining_count);
+    }
     Ok(())
 }

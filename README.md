@@ -1,19 +1,26 @@
 # logfine
 
-A CLI logger designed to generate structured data (JSON) perfect for AI analysis and personal trend tracking.
+A local-first CLI logger designed to generate structured data (JSON) perfect for AI analysis and personal trend tracking.
 
 ## Features
 
-- Keep a record of tasks in your todo.txt file.
-- Lineal flow, keep up a daily track of your energy state, MVO's, and "What worked", "What failed" and "Output".
-- Stores everything into a local sqlite database. And you can export your data into a JSON file.
+- Energy, MVOs (Minimum Viable Output) and logbook tracking.
+- todo.txt integration & synchronization.
+- Vim-like keybindings driven workflow.
+- Structured querying & filtering by using a SQLite database.
+- Local-first architecture ensuring offline and private usage.
+- High performance & memory safety by using Rust and an ORM (via Diesel).
 
 ## Usage examples
 
-I use this tool to ask GPT for patterns, low leverage tasks, misalignment between my effort and output...
-You can use the JSON file for charts and see progress.
+The purpose of this program is to help identify patterns by keeping track of daily habits, energy levels, tasks and events.
+Helping with decision-making and externalizing memory.
 
 ![Program Flow](https://github.com/damicrez/logfine/blob/main/flowexample.gif)
+
+Personally, I use this tool to ask Claude for patterns, busywork, misalignment between my effort and output.
+
+![AI analysis](https://github.com/damicrez/logfine/blob/main/usageExample.png)
 
 ## Installation
 
@@ -24,7 +31,7 @@ Since *logfine* is built in Rust, you can easily compile it from source. This en
 You need to have the Rust toolchain installed on your system. If you don't have it yet, you can install it via [rustup](https://rustup.rs/):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf [https://sh.rustup.rs](https://sh.rustup.rs) | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ### Option 1: Install via Cargo (Recommended)
@@ -49,7 +56,7 @@ If you just want to compile the executable file without installing it globally i
 
 ```bash
 # Clone the repository
-git clone [https://github.com/damicrez/logfine.git](https://github.com/damicrez/logfine.git)
+git clone https://github.com/damicrez/logfine.git
 cd logfine
 
 # Compile in release mode (optimized)
@@ -57,23 +64,50 @@ cargo build --release
 ```
 
 ## Configuration
-It should be located at ~/.config/logfine/logfine.toml
 
-It's kinda self-explainatory, but...
+It should be located at your personal configuration directory (~/.config/logfine/logfine.toml in Unix systems)
 
-**logbook_path**: Stores a sqlite database with the tasks and log data, you can check it by yourself.
+Here's an explanation of every configuration item:
 
-**todo_path**: It should contain your todo.txt file, so logfine can register your completed and non-completed tasks.
+**logbook_path**: Directory where a sqlite database will be located.
 
-**mvos**: Is a list of strings with the *Minimum Viable Output* of your day, so you can keep track of it everyday.
+**todo_path**: Path to your todo.txt file.
 
-**delete_tasks**: A true|false configuration variable to delete or no delete the completed tasks in your todo.txt file.
+**mvos**: Is a list of strings with the *Minimum Viable Output* of your day.
+
+**delete_tasks**: A true|false variable to delete or not delete the completed tasks in your todo.txt file.
+
+**automatic_completion_date**: A true|false configuration variable to append completion dates when a task is marked as completed, helping following the todo.txt format.
 
 ### Example
 
 ```toml
-logbook_path = "/home/damicrez/Documents/life/logbook/"
-todo_path = "/home/damicrez/Nextcloud/README.md"
-mvos = ["Code commit", "Zettelkasten note", "Social interaction"]
-delete_tasks = false
+logbook_path = "/home/username/Documents/life/"
+todo_path = "/home/username/Nextcloud/todo.txt"
+mvos = ["Code commit", "Zettelkasten note", "Social exposure"]
+delete_tasks = true
+automatic_completion_date = false
 ```
+
+## Subcommands
+
+**export**: Export the last N days of daily logs to a JSON file.
+
+```bash
+# Export the last 7 days (default) to JSON
+logfine export
+
+# Export the last 30 days to a custom output file
+logfine export 30 -o monthly_report.json
+```
+
+**sync**: Synchronize tasks with the database cache without prompts.
+
+```bash
+# Sync todo.txt with the database
+logfine sync
+
+# Automatically accept detected typos during sync
+logfine sync --skip-typos
+```
+

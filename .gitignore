@@ -4,3 +4,5 @@
 .DS_Store
 .swp
 .direnv/
+./flowchart.md-1.svg
+./flowchart.md
