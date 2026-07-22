@@ -11,16 +11,20 @@ A local-first CLI logger designed to generate structured data (JSON) perfect for
 - Local-first architecture ensuring offline and private usage.
 - High performance & memory safety by using Rust and an ORM (via Diesel).
 
-## Usage examples
+## Why?
 
 The purpose of this program is to help identify patterns by keeping track of daily habits, energy levels, tasks and events.
-Helping with decision-making and externalizing memory.
+**Helping with decision-making and externalizing memory**.
 
-![Program Flow](https://github.com/damicrez/logfine/blob/main/flowexample.gif)
+![Program Flow](./flowexample.gif)
 
-Personally, I use this tool to ask Claude for patterns, busywork, misalignment between my effort and output.
+Personally, I use this tool **to ask Claude** for patterns, busywork, misalignment between my effort and output, which habits correlate with my highest energy, etc.
 
-![AI analysis](https://github.com/damicrez/logfine/blob/main/usageExample.png)
+![AI analysis](./logfineclaudeusage.gif)
+
+That's why the data can be exported to JSON and is stored in a database; **Is both human-readable and machine-readable.**.
+
+![Database showcase](./sqlexample.gif)
 
 ## Installation
 
@@ -65,7 +69,7 @@ cargo build --release
 
 ## Configuration
 
-It should be located at your personal configuration directory (~/.config/logfine/logfine.toml in Unix systems)
+It should be located at your default configuration directory (~/.config/logfine/logfine.toml on Unix-like systems.)
 
 Here's an explanation of every configuration item:
 
