@@ -22,7 +22,7 @@ Personally, I use this tool **to ask Claude** for patterns, busywork, misalignme
 
 ![AI analysis](./logfineclaudeusage.gif)
 
-That's why the data can be exported to JSON and is stored in a database; **Is both human-readable and machine-readable.**.
+That's why the data can be exported to JSON and is stored in a database; **Is both human-readable and machine-readable**.
 
 ![Database showcase](./sqlexample.gif)
 
