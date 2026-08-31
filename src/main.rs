@@ -22,11 +22,10 @@ use regex::Regex;
 
 use crate::models::{LogDb, NewLogDb, NewTaskDb, TodoCacheDb, TaskDb};
 
-pub const STYLE_SUCCESS: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
-pub const STYLE_ERROR: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
-pub const STYLE_WARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
-pub const STYLE_INFO: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue)));
-pub const STYLE_RESET: Reset = Reset;
+pub const COLOR_SUCCESS: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
+pub const COLOR_WARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
+pub const COLOR_INFO: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue)));
+pub const COLOR_RESET: Reset = Reset;
 
 /// Built in Rust, logfine is a CLI tool to keep track of your days.
 #[derive(Parser)]
@@ -61,9 +60,31 @@ pub struct Task {
     pub priority: Option<char>,
     pub completion_date: Option<DateTime<Utc>>,
     pub creation_date: Option<DateTime<Utc>>,
-    pub project_tag: Option<String>,
-    pub context_tag: Option<String>,
+    pub project_tags: Vec<String>,
+    pub context_tags: Vec<String>,
     pub key_value_tags: HashMap<String, String>,
+}
+
+impl Task {
+    /// Serializes project tags to JSON for database storage, returns None if empty
+    fn project_tags_json(&self) -> Option<String> {
+        if self.project_tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&self.project_tags)
+                .expect("Vec<String> serialization is infallible"))
+        }
+    }
+
+    /// Serializes context tags to JSON for database storage, returns None if empty
+    fn context_tags_json(&self) -> Option<String> {
+        if self.context_tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&self.context_tags)
+                .expect("Vec<String> serialization is infallible"))
+        }
+    }
 }
 
 /// Configuration settings
@@ -107,11 +128,6 @@ fn load_config() -> Result<Config> {
         }
         Err(err) => {
             if err.kind() == io::ErrorKind::NotFound {
-                println!("{STYLE_INFO}Config file not found. Writing default config at:{STYLE_RESET} {:?}", path);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
                 let default_config = Config {
                     mvos: vec![
                         "Read one chapter of a book".to_string(),
@@ -120,11 +136,24 @@ fn load_config() -> Result<Config> {
                     ],
                     ..Default::default()
                 };
+
+                // Warn if an existing database is found at the default path
+                let db_path = default_config.logbook_path.join("logfine.db");
+                if db_path.exists() {
+                    eprintln!("{COLOR_WARN}Warning: An existing database was found at:{COLOR_RESET} {:?}", db_path);
+                    eprintln!("{COLOR_WARN}but no config file exists. A default config will be written.{COLOR_RESET}");
+                    eprintln!("{COLOR_WARN}If you migrated from another system, restore your config to:{COLOR_RESET} {:?}", path);
+                }
+
+                println!("{COLOR_INFO}Config file not found. Writing default config at:{COLOR_RESET} {:?}", path);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 
                 let default_content = toml::to_string(&default_config)?;
                 fs::write(&path, default_content)?;
                 
-                println!("{STYLE_INFO}Database file created at:{STYLE_RESET} {:?}", default_config.logbook_path);
+                println!("{COLOR_INFO}Database will be stored at:{COLOR_RESET} {:?}", default_config.logbook_path.join("logfine.db"));
                 Ok(default_config)
             } else {
                 Err(err.into())
@@ -260,23 +289,21 @@ fn parse_task(line: &str) -> Option<Task> {
                 creation_date = Some(d2.and_hms_opt(0, 0, 0).unwrap().and_utc());
             }
         }
-    } else {
-        if let Some(d1) = date1_str.and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()) {
-            creation_date = Some(d1.and_hms_opt(0, 0, 0).unwrap().and_utc());
-        }
+    } else if let Some(d1) = date1_str.and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()) {
+        creation_date = Some(d1.and_hms_opt(0, 0, 0).unwrap().and_utc());
     }
 
     let description = captures.get(5).map(|m| m.as_str()).unwrap_or("");
     
-    let mut project_tag = None;
-    let mut context_tag = None;
+    let mut project_tags = Vec::new();
+    let mut context_tags = Vec::new();
     let mut key_value_tags = HashMap::new();
 
     for item in description.split_whitespace() {
-        if item.starts_with('+') && item.len() > 1 && project_tag.is_none() {
-            project_tag = Some(item[1..].to_string());
-        } else if item.starts_with('@') && item.len() > 1 && context_tag.is_none() {
-            context_tag = Some(item[1..].to_string());
+        if item.starts_with('+') && item.len() > 1 {
+            project_tags.push(item[1..].to_string());
+        } else if item.starts_with('@') && item.len() > 1 {
+            context_tags.push(item[1..].to_string());
         } else if let Some((key, value)) = item.split_once(':').filter(|(k, v)| !k.is_empty() && !v.is_empty()) {
             key_value_tags.insert(key.to_string(), value.to_string());
         }
@@ -287,8 +314,8 @@ fn parse_task(line: &str) -> Option<Task> {
         priority,
         completion_date,
         creation_date,
-        project_tag,
-        context_tag,
+        project_tags,
+        context_tags,
         key_value_tags,
     })
 }
@@ -508,8 +535,9 @@ fn insert_db_task(
         priority: task.priority.map(|c| c.to_string()),
         completion_date: task.completion_date.map(|d| d.to_rfc3339()),
         creation_date: task.creation_date.map(|d| d.to_rfc3339()),
-        project_tag: task.project_tag.clone(),
-        context_tag: task.context_tag.clone(),
+        project_tag: task.project_tags_json(),
+        context_tag: task.context_tags_json(),
+        // Serialization of HashMap<String, String> to JSON is infallible
         key_value_tags: serde_json::to_string(&task.key_value_tags)?,
         raw_line: raw_line_str,
         is_completed: is_completed_flag,
@@ -556,8 +584,8 @@ struct ExportedTask {
     priority: Option<String>,
     completion_date: Option<String>,
     creation_date: Option<String>,
-    project_tag: Option<String>,
-    context_tag: Option<String>,
+    project_tags: Vec<String>,
+    context_tags: Vec<String>,
     key_value_tags: serde_json::Value,
     raw_line: String,
     is_completed: bool,
@@ -604,8 +632,12 @@ fn export_database_to_json(
                     priority: t.priority,
                     completion_date: t.completion_date,
                     creation_date: t.creation_date,
-                    project_tag: t.project_tag,
-                    context_tag: t.context_tag,
+                    project_tags: t.project_tag.as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default(),
+                    context_tags: t.context_tag.as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default(),
                     key_value_tags: kv_tags,
                     raw_line: t.raw_line,
                     is_completed: t.is_completed,
@@ -653,7 +685,7 @@ fn main() -> Result<()> {
         });
 
         export_database_to_json(&mut db_connection, resolved_days, &output_path)?;
-        println!("{STYLE_INFO}Exported the last {} days to:{STYLE_RESET} {:?}", resolved_days, output_path);
+        println!("{COLOR_INFO}Exported the last {} days to:{COLOR_RESET} {:?}", resolved_days, output_path);
         return Ok(());
     }
     
@@ -680,11 +712,16 @@ fn main() -> Result<()> {
     let log = get_or_create_log(&mut db_connection, &formatted_date)?;
 
     // Synchronize todo tasks
-    let sync_state = cache_sync(&app_config, &mut db_connection)?;
+    let SyncState {
+        actions: sync_actions,
+        cache_inserts,
+        cache_deletes,
+        file_rewrites,
+    } = cache_sync(&app_config, &mut db_connection)?;
 
     // Collect user decisions for modified tasks first to avoid holding a transaction lock during prompts
     let mut resolved_actions = Vec::new();
-    for action in sync_state.actions {
+    for action in sync_actions {
         match action {
             TaskAction::Added { raw_line, task } => {
                 resolved_actions.push((TaskAction::Added { raw_line, task }, false));
@@ -697,12 +734,12 @@ fn main() -> Result<()> {
             }
             TaskAction::Modified { old_raw, new_raw, new_task } => {
                 let is_typo = if skip_typos {
-                    println!("{STYLE_INFO}Auto-accepted typo for task:{STYLE_RESET} {}", new_raw);
+                    println!("{COLOR_INFO}Auto-accepted typo for task:{COLOR_RESET} {}", new_raw);
                     true
                 } else {
-                    println!("{STYLE_INFO}A possible modification/typo was detected:{STYLE_RESET}");
-                    println!("  {STYLE_WARN}Old:{STYLE_RESET} {}", old_raw);
-                    println!("  {STYLE_SUCCESS}New:{STYLE_RESET} {}", new_raw);
+                    println!("{COLOR_INFO}A possible modification/typo was detected:{COLOR_RESET}");
+                    println!("  {COLOR_WARN}Old:{COLOR_RESET} {}", old_raw);
+                    println!("  {COLOR_SUCCESS}New:{COLOR_RESET} {}", new_raw);
                     Confirm::new("Was this a typo correction?")
                         .with_default(true)
                         .prompt()?
@@ -715,12 +752,12 @@ fn main() -> Result<()> {
     // Apply all updates in a single transaction
     db_connection.transaction::<_, anyhow::Error, _>(|conn| {
         use crate::schema::todo_cache::dsl::*;
-        if !sync_state.cache_deletes.is_empty() {
-            diesel::delete(todo_cache.filter(raw_line.eq_any(&sync_state.cache_deletes)))
+        if !cache_deletes.is_empty() {
+            diesel::delete(todo_cache.filter(raw_line.eq_any(&cache_deletes)))
                 .execute(conn)?;
         }
-        if !sync_state.cache_inserts.is_empty() {
-            let inserts: Vec<TodoCacheDb> = sync_state.cache_inserts
+        if !cache_inserts.is_empty() {
+            let inserts: Vec<TodoCacheDb> = cache_inserts
                 .into_iter()
                 .map(|line| TodoCacheDb { raw_line: line })
                 .collect();
@@ -734,39 +771,41 @@ fn main() -> Result<()> {
                 TaskAction::Added { raw_line: added_raw_line, task } => {
                     let is_completed_flag = added_raw_line.starts_with("x ");
                     insert_db_task(conn, log.id, &task, &added_raw_line, is_completed_flag)?;
-                    println!("{STYLE_WARN}+ New task processed:{STYLE_RESET} {}", added_raw_line);
+                    println!("{COLOR_WARN}+ New task processed:{COLOR_RESET} {}", added_raw_line);
                 }
                 TaskAction::Completed { old_raw, new_raw, new_task } => {
                     use crate::schema::tasks::dsl::*;
                     diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(false))))
                         .set((
+                            log_id.eq(log.id),
                             priority.eq(new_task.priority.map(|c| c.to_string())),
                             completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
                             creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
-                            project_tag.eq(new_task.project_tag.clone()),
-                            context_tag.eq(new_task.context_tag.clone()),
+                            project_tag.eq(new_task.project_tags_json()),
+                            context_tag.eq(new_task.context_tags_json()),
                             key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
                             raw_line.eq(&new_raw),
                             is_completed.eq(true),
                         ))
                         .execute(conn)?;
-                    println!("{STYLE_SUCCESS}✓ Task completed:{STYLE_RESET} {}", new_raw);
+                    println!("{COLOR_SUCCESS}✓ Task completed:{COLOR_RESET} {}", new_raw);
                 }
                 TaskAction::Reopened { old_raw, new_raw, new_task } => {
                     use crate::schema::tasks::dsl::*;
                     diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(true))))
                         .set((
+                            log_id.eq(log.id),
                             priority.eq(new_task.priority.map(|c| c.to_string())),
                             completion_date.eq(None::<String>),
                             creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
-                            project_tag.eq(new_task.project_tag.clone()),
-                            context_tag.eq(new_task.context_tag.clone()),
+                            project_tag.eq(new_task.project_tags_json()),
+                            context_tag.eq(new_task.context_tags_json()),
                             key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
                             raw_line.eq(&new_raw),
                             is_completed.eq(false),
                         ))
                         .execute(conn)?;
-                    println!("{STYLE_WARN}↺ Task reopened:{STYLE_RESET} {}", new_raw);
+                    println!("{COLOR_WARN}↺ Task reopened:{COLOR_RESET} {}", new_raw);
                 }
                 TaskAction::Modified { old_raw, new_raw, new_task } => {
                     let is_completed_flag = new_raw.starts_with("x ");
@@ -778,17 +817,17 @@ fn main() -> Result<()> {
                                 priority.eq(new_task.priority.map(|c| c.to_string())),
                                 completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
                                 creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
-                                project_tag.eq(new_task.project_tag.clone()),
-                                context_tag.eq(new_task.context_tag.clone()),
+                                project_tag.eq(new_task.project_tags_json()),
+                                context_tag.eq(new_task.context_tags_json()),
                                 key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
                                 raw_line.eq(&new_raw),
                                 is_completed.eq(is_completed_flag),
                             ))
                             .execute(conn)?;
-                        println!("{STYLE_INFO}~ Log updated.{STYLE_RESET}");
+                        println!("{COLOR_INFO}~ Log updated.{COLOR_RESET}");
                     } else {
                         insert_db_task(conn, log.id, &new_task, &new_raw, is_completed_flag)?;
-                        println!("{STYLE_INFO}+ Treated as a new task.{STYLE_RESET}");
+                        println!("{COLOR_INFO}+ Treated as a new task.{COLOR_RESET}");
                     }
                 }
             }
@@ -796,13 +835,13 @@ fn main() -> Result<()> {
         Ok(())
     })?;
 
-    if !sync_state.file_rewrites.is_empty() {
+    if !file_rewrites.is_empty() {
         let file = File::open(&app_config.todo_path)?;
         let reader = BufReader::new(file);
         let mut lines = Vec::new();
         for line in reader.lines() {
             let mut l = line?;
-            if let Some(new_raw) = sync_state.file_rewrites.get(&l) {
+            if let Some(new_raw) = file_rewrites.get(&l) {
                 l = new_raw.clone();
             }
             lines.push(l);
@@ -855,18 +894,20 @@ fn main() -> Result<()> {
         let (completed_today_count, remaining_count) = {
             use crate::schema::tasks::dsl::*;
             let comp: i64 = tasks
+                .filter(log_id.eq(log.id))
                 .filter(is_completed.eq(true))
                 .filter(completion_date.like(format!("{}%", formatted_date)))
                 .count()
                 .get_result(&mut db_connection)?;
             let rem: i64 = tasks
+                .filter(log_id.eq(log.id))
                 .filter(is_completed.eq(false))
                 .count()
                 .get_result(&mut db_connection)?;
             (comp, rem)
         };
 
-        println!("{STYLE_SUCCESS}>{STYLE_RESET} Today's completed tasks {STYLE_SUCCESS}{}{STYLE_RESET}, remaining tasks {STYLE_WARN}{}{STYLE_RESET}", completed_today_count, remaining_count);
+        println!("{COLOR_SUCCESS}>{COLOR_RESET} Today's completed tasks {COLOR_SUCCESS}{}{COLOR_RESET}, remaining tasks {COLOR_WARN}{}{COLOR_RESET}", completed_today_count, remaining_count);
     }
     Ok(())
 }
