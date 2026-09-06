@@ -112,7 +112,6 @@ pub fn apply_sync_updates(
                     diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(false))))
                         .set((
                             log_id.eq(target_log_id),
-                            priority.eq(new_task.priority.map(|c| c.to_string())),
                             completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
                             creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
                             project_tag.eq(new_task.project_tags_json()),
@@ -145,18 +144,36 @@ pub fn apply_sync_updates(
                     use crate::schema::tasks::dsl::*;
                     let is_completed_flag = new_raw.starts_with("x ");
                     let old_completed = old_raw.starts_with("x ");
-                    diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(old_completed))))
-                        .set((
-                            priority.eq(new_task.priority.map(|c| c.to_string())),
-                            completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
-                            creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
-                            project_tag.eq(new_task.project_tags_json()),
-                            context_tag.eq(new_task.context_tags_json()),
-                            key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
-                            raw_line.eq(&new_raw),
-                            is_completed.eq(is_completed_flag),
-                        ))
-                        .execute(conn)?;
+                    let preserve_priority = old_completed && is_completed_flag && new_task.priority.is_none();
+
+                    let query = tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(old_completed)));
+
+                    if preserve_priority {
+                        diesel::update(query)
+                            .set((
+                                completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
+                                creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                                project_tag.eq(new_task.project_tags_json()),
+                                context_tag.eq(new_task.context_tags_json()),
+                                key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                                raw_line.eq(&new_raw),
+                                is_completed.eq(is_completed_flag),
+                            ))
+                            .execute(conn)?;
+                    } else {
+                        diesel::update(query)
+                            .set((
+                                priority.eq(new_task.priority.map(|c| c.to_string())),
+                                completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
+                                creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                                project_tag.eq(new_task.project_tags_json()),
+                                context_tag.eq(new_task.context_tags_json()),
+                                key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                                raw_line.eq(&new_raw),
+                                is_completed.eq(is_completed_flag),
+                            ))
+                            .execute(conn)?;
+                    }
                     println!("{COLOR_INFO}~ Log updated.{COLOR_RESET}");
                 }
             }
@@ -222,4 +239,116 @@ pub fn get_today_completed_tasks_count(
         .count()
         .get_result(db_connection)?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::parse_task;
+
+    fn setup_test_db() -> (SqliteConnection, LogDb) {
+        let mut conn = SqliteConnection::establish(":memory:").expect("Failed to connect to in-memory DB");
+        conn.run_pending_migrations(MIGRATIONS).expect("Failed to run migrations");
+        let log = get_or_create_log(&mut conn, "2026-09-05").unwrap();
+        (conn, log)
+    }
+
+    #[test]
+    fn test_completed_task_preserves_priority() {
+        use crate::schema::tasks::dsl::*;
+
+        let (mut conn, log) = setup_test_db();
+        let initial_raw = "(A) Important meeting +work";
+        let task_a = parse_task(initial_raw).unwrap();
+
+        // 1. Add new task with priority A
+        apply_sync_updates(
+            &mut conn,
+            log.id,
+            &[],
+            &[initial_raw.to_string()],
+            vec![TaskAction::Added {
+                raw_line: initial_raw.to_string(),
+                task: task_a,
+            }],
+        ).unwrap();
+
+        let db_task = tasks.filter(raw_line.eq(initial_raw)).first::<TaskDb>(&mut conn).unwrap();
+        assert_eq!(db_task.priority, Some("A".to_string()));
+        assert!(!db_task.is_completed);
+
+        // 2. Complete task in todo.txt: standard completion line removes (A)
+        let completed_raw = "x 2026-09-05 Important meeting +work";
+        let task_completed = parse_task(completed_raw).unwrap();
+        assert_eq!(task_completed.priority, None);
+
+        apply_sync_updates(
+            &mut conn,
+            log.id,
+            &[initial_raw.to_string()],
+            &[completed_raw.to_string()],
+            vec![TaskAction::Completed {
+                old_raw: initial_raw.to_string(),
+                new_raw: completed_raw.to_string(),
+                new_task: task_completed,
+            }],
+        ).unwrap();
+
+        let updated_task = tasks.filter(raw_line.eq(completed_raw)).first::<TaskDb>(&mut conn).unwrap();
+        assert!(updated_task.is_completed);
+        assert_eq!(
+            updated_task.priority,
+            Some("A".to_string()),
+            "Priority should NOT be overwritten with NULL on completion"
+        );
+
+        // 3. Modify completed task typo
+        let modified_raw = "x 2026-09-05 Important meeting with team +work";
+        let task_modified = parse_task(modified_raw).unwrap();
+        assert_eq!(task_modified.priority, None);
+
+        apply_sync_updates(
+            &mut conn,
+            log.id,
+            &[completed_raw.to_string()],
+            &[modified_raw.to_string()],
+            vec![TaskAction::Modified {
+                old_raw: completed_raw.to_string(),
+                new_raw: modified_raw.to_string(),
+                new_task: task_modified,
+            }],
+        ).unwrap();
+
+        let modified_task = tasks.filter(raw_line.eq(modified_raw)).first::<TaskDb>(&mut conn).unwrap();
+        assert_eq!(
+            modified_task.priority,
+            Some("A".to_string()),
+            "Priority should NOT be overwritten with NULL on completed task typo modification"
+        );
+
+        // 4. Reopen task without priority -> priority becomes None
+        let reopened_raw = "Important meeting with team +work";
+        let task_reopened = parse_task(reopened_raw).unwrap();
+        assert_eq!(task_reopened.priority, None);
+
+        apply_sync_updates(
+            &mut conn,
+            log.id,
+            &[modified_raw.to_string()],
+            &[reopened_raw.to_string()],
+            vec![TaskAction::Reopened {
+                old_raw: modified_raw.to_string(),
+                new_raw: reopened_raw.to_string(),
+                new_task: task_reopened,
+            }],
+        ).unwrap();
+
+        let reopened_task = tasks.filter(raw_line.eq(reopened_raw)).first::<TaskDb>(&mut conn).unwrap();
+        assert!(!reopened_task.is_completed);
+        assert_eq!(
+            reopened_task.priority,
+            None,
+            "Priority becomes None when reopened without priority"
+        );
+    }
 }
