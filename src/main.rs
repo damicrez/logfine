@@ -12,15 +12,14 @@ pub mod ui;
 use std::fs;
 use std::path::PathBuf;
 use anyhow::Result;
-use chrono::{DateTime, Local};
+use chrono::Local;
 use clap::Parser;
-use inquire::Confirm;
 
 use crate::cli::{CliArgs, CliCommands, COLOR_INFO, COLOR_RESET, COLOR_SUCCESS, COLOR_WARN};
 use crate::config::load_config;
 use crate::export::export_database_to_json;
-use crate::file_utils::{delete_completed_tasks, rewrite_todo_file};
-use crate::sync::{cache_sync, SyncState, TaskAction};
+use crate::file_utils::{count_remaining_tasks, delete_completed_tasks, rewrite_todo_file};
+use crate::sync::{cache_sync, SyncState};
 use crate::ui::{launch_log, prompt_energy_state, prompt_mvo_items};
 
 fn main() -> Result<()> {
@@ -48,8 +47,7 @@ fn main() -> Result<()> {
         skip_typos = skip;
     }
 
-    let current_time: DateTime<Local> = Local::now();
-    let formatted_date = current_time.format("%Y-%m-%d").to_string();
+    let formatted_date = Local::now().format("%Y-%m-%d").to_string();
     let app_config = load_config()?;
 
     // Establish DB connection & run migrations
@@ -68,37 +66,7 @@ fn main() -> Result<()> {
         cache_inserts,
         cache_deletes,
         file_rewrites,
-    } = cache_sync(&app_config, &mut db_connection)?;
-
-    // Collect user decisions for modified tasks first to avoid holding a transaction lock during prompts
-    let mut resolved_actions = Vec::new();
-    for action in sync_actions {
-        match action {
-            TaskAction::Added { raw_line, task } => {
-                resolved_actions.push((TaskAction::Added { raw_line, task }, false));
-            }
-            TaskAction::Completed { old_raw, new_raw, new_task } => {
-                resolved_actions.push((TaskAction::Completed { old_raw, new_raw, new_task }, false));
-            }
-            TaskAction::Reopened { old_raw, new_raw, new_task } => {
-                resolved_actions.push((TaskAction::Reopened { old_raw, new_raw, new_task }, false));
-            }
-            TaskAction::Modified { old_raw, new_raw, new_task } => {
-                let is_typo = if skip_typos {
-                    println!("{COLOR_INFO}Auto-accepted typo for task:{COLOR_RESET} {}", new_raw);
-                    true
-                } else {
-                    println!("{COLOR_INFO}A possible modification/typo was detected:{COLOR_RESET}");
-                    println!("  {COLOR_WARN}Old:{COLOR_RESET} {}", old_raw);
-                    println!("  {COLOR_SUCCESS}New:{COLOR_RESET} {}", new_raw);
-                    Confirm::new("Was this a typo correction?")
-                        .with_default(true)
-                        .prompt()?
-                };
-                resolved_actions.push((TaskAction::Modified { old_raw, new_raw, new_task }, is_typo));
-            }
-        }
-    }
+    } = cache_sync(&app_config, &mut db_connection, skip_typos)?;
 
     // Apply all updates in a single transaction
     db::apply_sync_updates(
@@ -106,7 +74,7 @@ fn main() -> Result<()> {
         log.id,
         &cache_deletes,
         &cache_inserts,
-        resolved_actions,
+        sync_actions,
     )?;
 
     // Rewrite modified lines if auto-completion date or formatting was updated
@@ -117,6 +85,9 @@ fn main() -> Result<()> {
     if app_config.delete_tasks {
         delete_completed_tasks(&app_config.todo_path)?;
     }
+
+    // Count remaining tasks from the file (after archiving)
+    let remaining_count = count_remaining_tasks(&app_config.todo_path)?;
 
     if !sync_only {
         let existing_energy = log.energy as u8;
@@ -139,15 +110,15 @@ fn main() -> Result<()> {
             &failed_items,
             &output_items,
         )?;
-
-        let (completed_today_count, remaining_count) =
-            db::get_today_task_counts(&mut db_connection, log.id, &formatted_date)?;
-
-        println!(
-            "{COLOR_SUCCESS}>{COLOR_RESET} Today's completed tasks {COLOR_SUCCESS}{}{COLOR_RESET}, remaining tasks {COLOR_WARN}{}{COLOR_RESET}",
-            completed_today_count, remaining_count
-        );
     }
+
+    // Query DB for total tasks completed today
+    let completed_count = db::get_today_completed_tasks_count(&mut db_connection, log.id)?;
+
+    println!(
+        "{COLOR_SUCCESS}>{COLOR_RESET} Today's completed tasks {COLOR_SUCCESS}{}{COLOR_RESET}, remaining tasks {COLOR_WARN}{}{COLOR_RESET}",
+        completed_count, remaining_count
+    );
 
     Ok(())
 }

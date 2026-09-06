@@ -66,3 +66,35 @@ pub fn rewrite_todo_file(
 
     atomic_write(todo_path, &content)
 }
+
+/// Counts the number of remaining (non-completed) tasks in the todo file
+pub fn count_remaining_tasks(todo_path: &Path) -> Result<usize> {
+    let file = File::open(todo_path)?;
+    let reader = BufReader::new(file);
+    let count = reader
+        .lines()
+        .filter_map(|line| line.ok())
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("x ")
+        })
+        .count();
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_remaining_tasks() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join(format!("test_todo_{}.txt", std::process::id()));
+        let content = "(A) Active task 1\nx 2026-09-05 Completed task\n\nActive task 2\nx Completed task 2\n";
+        fs::write(&test_path, content).unwrap();
+
+        let count = count_remaining_tasks(&test_path).unwrap();
+        let _ = fs::remove_file(&test_path);
+        assert_eq!(count, 2);
+    }
+}

@@ -26,6 +26,9 @@ pub fn prompt_energy_state(default_val: u8) -> Result<u8> {
 
 /// Prompt the user to select completed Minimum Viable Output (MVO) items
 pub fn prompt_mvo_items(items: &[String], existing_mvos: &[String]) -> Result<Vec<String>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
     let default_indices: Vec<usize> = items
         .iter()
         .enumerate()
@@ -107,4 +110,25 @@ pub fn launch_log(
         parse_section(&content, "What failed"),
         parse_section(&content, "Output"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prompt_mvo_items_empty() {
+        let items: Vec<String> = Vec::new();
+        let existing: Vec<String> = Vec::new();
+        let result = prompt_mvo_items(&items, &existing).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_section_basic() {
+        let content = "[What worked]\n- Task A\n- Task B\n\n[What failed]\n- Task C\n";
+        assert_eq!(parse_section(content, "What worked"), vec!["Task A", "Task B"]);
+        assert_eq!(parse_section(content, "What failed"), vec!["Task C"]);
+        assert!(parse_section(content, "Output").is_empty());
+    }
 }

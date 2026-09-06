@@ -82,7 +82,7 @@ pub fn apply_sync_updates(
     target_log_id: i32,
     cache_deletes: &[String],
     cache_inserts: &[String],
-    resolved_actions: Vec<(TaskAction, bool)>,
+    resolved_actions: Vec<TaskAction>,
 ) -> Result<()> {
     db_connection.transaction::<_, anyhow::Error, _>(|conn| {
         use crate::schema::todo_cache::dsl::*;
@@ -100,7 +100,7 @@ pub fn apply_sync_updates(
                 .execute(conn)?;
         }
 
-        for (action, is_typo) in resolved_actions {
+        for action in resolved_actions {
             match action {
                 TaskAction::Added { raw_line: added_raw_line, task } => {
                     let is_completed_flag = added_raw_line.starts_with("x ");
@@ -142,27 +142,22 @@ pub fn apply_sync_updates(
                     println!("{COLOR_WARN}↺ Task reopened:{COLOR_RESET} {}", new_raw);
                 }
                 TaskAction::Modified { old_raw, new_raw, new_task } => {
+                    use crate::schema::tasks::dsl::*;
                     let is_completed_flag = new_raw.starts_with("x ");
-                    if is_typo {
-                        use crate::schema::tasks::dsl::*;
-                        let old_completed = old_raw.starts_with("x ");
-                        diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(old_completed))))
-                            .set((
-                                priority.eq(new_task.priority.map(|c| c.to_string())),
-                                completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
-                                creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
-                                project_tag.eq(new_task.project_tags_json()),
-                                context_tag.eq(new_task.context_tags_json()),
-                                key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
-                                raw_line.eq(&new_raw),
-                                is_completed.eq(is_completed_flag),
-                            ))
-                            .execute(conn)?;
-                        println!("{COLOR_INFO}~ Log updated.{COLOR_RESET}");
-                    } else {
-                        insert_db_task(conn, target_log_id, &new_task, &new_raw, is_completed_flag)?;
-                        println!("{COLOR_INFO}+ Treated as a new task.{COLOR_RESET}");
-                    }
+                    let old_completed = old_raw.starts_with("x ");
+                    diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(old_completed))))
+                        .set((
+                            priority.eq(new_task.priority.map(|c| c.to_string())),
+                            completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
+                            creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                            project_tag.eq(new_task.project_tags_json()),
+                            context_tag.eq(new_task.context_tags_json()),
+                            key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                            raw_line.eq(&new_raw),
+                            is_completed.eq(is_completed_flag),
+                        ))
+                        .execute(conn)?;
+                    println!("{COLOR_INFO}~ Log updated.{COLOR_RESET}");
                 }
             }
         }
@@ -215,23 +210,16 @@ pub fn update_log_reflections(
     Ok(())
 }
 
-/// Computes completed and remaining task counts for today's log
-pub fn get_today_task_counts(
+/// Computes completed task count for today's log
+pub fn get_today_completed_tasks_count(
     db_connection: &mut SqliteConnection,
     target_log_id: i32,
-    formatted_date: &str,
-) -> Result<(i64, i64)> {
+) -> Result<i64> {
     use crate::schema::tasks::dsl::*;
-    let comp: i64 = tasks
+    let count = tasks
         .filter(log_id.eq(target_log_id))
         .filter(is_completed.eq(true))
-        .filter(completion_date.like(format!("{}%", formatted_date)))
         .count()
         .get_result(db_connection)?;
-    let rem: i64 = tasks
-        .filter(log_id.eq(target_log_id))
-        .filter(is_completed.eq(false))
-        .count()
-        .get_result(db_connection)?;
-    Ok((comp, rem))
+    Ok(count)
 }
