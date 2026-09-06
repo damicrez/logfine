@@ -1,13 +1,23 @@
 use std::fs;
 use std::path::Path;
 use anyhow::Result;
+use chrono::NaiveDate;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{LogDb, TaskDb};
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportFilter {
+    Days(usize),
+    Range {
+        start: Option<NaiveDate>,
+        end: NaiveDate,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ExportedTask {
     pub priority: Option<String>,
     pub completion_date: Option<String>,
@@ -19,7 +29,7 @@ pub struct ExportedTask {
     pub is_completed: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ExportedLog {
     pub date: String,
     pub energy: i32,
@@ -32,16 +42,34 @@ pub struct ExportedLog {
 
 pub fn export_database_to_json(
     db_connection: &mut SqliteConnection,
-    days: usize,
+    filter: ExportFilter,
     output_path: &Path,
-) -> Result<()> {
+) -> Result<usize> {
     use crate::schema::logs::dsl::*;
 
-    // 1. Fetch log entries
-    let log_entries = logs
-        .order(log_date.desc())
-        .limit(days as i64)
-        .load::<LogDb>(db_connection)?;
+    // 1. Fetch log entries according to filter
+    let log_entries = match filter {
+        ExportFilter::Days(days) => {
+            let mut entries = logs
+                .order(log_date.desc())
+                .limit(days as i64)
+                .load::<LogDb>(db_connection)?;
+            entries.reverse();
+            entries
+        }
+        ExportFilter::Range { start, end } => {
+            let mut query = logs.into_boxed();
+            if let Some(start_date) = start {
+                query = query.filter(log_date.ge(start_date.format("%Y-%m-%d").to_string()));
+            }
+            query = query.filter(log_date.le(end.format("%Y-%m-%d").to_string()));
+            query.order(log_date.asc()).load::<LogDb>(db_connection)?
+        }
+    };
+
+    if log_entries.is_empty() {
+        return Ok(0);
+    }
 
     // 2. Fetch all tasks for these logs
     let task_entries = TaskDb::belonging_to(&log_entries)
@@ -89,12 +117,143 @@ pub fn export_database_to_json(
         });
     }
 
-    // Reverse to sort oldest to newest (since query retrieved newest first)
-    exported_logs.reverse();
+    let count = exported_logs.len();
 
     // 4. Write to JSON file
     let json_data = serde_json::to_string_pretty(&exported_logs)?;
     fs::write(output_path, json_data)?;
 
-    Ok(())
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::MIGRATIONS;
+    use crate::models::{NewLogDb, NewTaskDb};
+    use diesel_migrations::MigrationHarness;
+    use std::fs;
+
+    fn setup_test_db() -> SqliteConnection {
+        let mut conn = SqliteConnection::establish(":memory:").expect("Failed to connect to in-memory DB");
+        conn.run_pending_migrations(MIGRATIONS).expect("Failed to run migrations");
+        conn
+    }
+
+    #[test]
+    fn test_export_by_range_and_inclusivity() {
+        use crate::schema::logs::dsl::*;
+        use crate::schema::tasks::dsl::*;
+
+        let mut conn = setup_test_db();
+
+        // Insert logs for 2026-08-01, 2026-08-15, 2026-09-01
+        let log_dates = vec!["2026-08-01", "2026-08-15", "2026-09-01"];
+        for d in &log_dates {
+            diesel::insert_into(logs)
+                .values(&NewLogDb {
+                    log_date: d,
+                    energy: 4,
+                    mvos: "[\"Exercise\"]",
+                    worked: "[]",
+                    failed: "[]",
+                    output: "[]",
+                })
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        let inserted_logs = logs.order(log_date.asc()).load::<LogDb>(&mut conn).unwrap();
+        // Insert task for log 2026-08-15
+        diesel::insert_into(tasks)
+            .values(&NewTaskDb {
+                log_id: inserted_logs[1].id,
+                priority: Some("A".to_string()),
+                completion_date: None,
+                creation_date: Some("2026-08-15".to_string()),
+                project_tag: None,
+                context_tag: None,
+                key_value_tags: "{}".to_string(),
+                raw_line: "(A) Mid-month task",
+                is_completed: false,
+            })
+            .execute(&mut conn)
+            .unwrap();
+
+        let temp_file = std::env::temp_dir().join("test_export_range.json");
+
+        // Test inclusive range: 2026-08-01 to 2026-08-15
+        let filter = ExportFilter::Range {
+            start: Some(NaiveDate::from_ymd_opt(2026, 8, 1).unwrap()),
+            end: NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(),
+        };
+
+        let count = export_database_to_json(&mut conn, filter, &temp_file).unwrap();
+        assert_eq!(count, 2);
+        assert!(temp_file.exists());
+
+        let content = fs::read_to_string(&temp_file).unwrap();
+        let parsed: Vec<ExportedLog> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].date, "2026-08-01");
+        assert_eq!(parsed[1].date, "2026-08-15");
+        assert_eq!(parsed[1].tasks.len(), 1);
+        assert_eq!(parsed[1].tasks[0].raw_line, "(A) Mid-month task");
+
+        let _ = fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_export_empty_range_does_not_create_file() {
+        let mut conn = setup_test_db();
+        let temp_file = std::env::temp_dir().join("test_export_empty.json");
+        if temp_file.exists() {
+            let _ = fs::remove_file(&temp_file);
+        }
+
+        let filter = ExportFilter::Range {
+            start: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+            end: NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
+        };
+
+        let count = export_database_to_json(&mut conn, filter, &temp_file).unwrap();
+        assert_eq!(count, 0);
+        assert!(!temp_file.exists(), "File should not be created if no logs exist");
+    }
+
+    #[test]
+    fn test_export_until_end_only() {
+        use crate::schema::logs::dsl::*;
+        let mut conn = setup_test_db();
+
+        for d in &["2026-07-01", "2026-08-01", "2026-09-01"] {
+            diesel::insert_into(logs)
+                .values(&NewLogDb {
+                    log_date: d,
+                    energy: 3,
+                    mvos: "[]",
+                    worked: "[]",
+                    failed: "[]",
+                    output: "[]",
+                })
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        let temp_file = std::env::temp_dir().join("test_export_until.json");
+        let filter = ExportFilter::Range {
+            start: None,
+            end: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+        };
+
+        let count = export_database_to_json(&mut conn, filter, &temp_file).unwrap();
+        assert_eq!(count, 2);
+        let content = fs::read_to_string(&temp_file).unwrap();
+        let parsed: Vec<ExportedLog> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].date, "2026-07-01");
+        assert_eq!(parsed[1].date, "2026-08-01");
+
+        let _ = fs::remove_file(&temp_file);
+    }
 }

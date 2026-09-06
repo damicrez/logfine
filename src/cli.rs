@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use anstyle::{AnsiColor, Color, Reset, Style};
 
+use chrono::NaiveDate;
+
 pub const COLOR_SUCCESS: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
 pub const COLOR_WARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
 pub const COLOR_INFO: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue)));
@@ -23,10 +25,17 @@ pub enum CliCommands {
         #[arg(long)]
         skip_typos: bool,
     },
-    /// Export the last N days of daily logs to a JSON file
+    /// Export logs to a JSON file
     Export {
         /// Number of days to export
+        #[arg(conflicts_with_all = ["start", "end"])]
         days: Option<usize>,
+        /// Filter logs starting from this date (YYYY-MM-DD)
+        #[arg(short = 's', long)]
+        start: Option<NaiveDate>,
+        /// Filter logs up to this date (YYYY-MM-DD)
+        #[arg(short = 'e', long)]
+        end: Option<NaiveDate>,
         /// Optional path to the output JSON file
         #[arg(short, long)]
         output: Option<PathBuf>,

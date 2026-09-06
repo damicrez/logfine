@@ -17,7 +17,7 @@ use clap::Parser;
 
 use crate::cli::{CliArgs, CliCommands, COLOR_INFO, COLOR_RESET, COLOR_SUCCESS, COLOR_WARN};
 use crate::config::load_config;
-use crate::export::export_database_to_json;
+use crate::export::{export_database_to_json, ExportFilter};
 use crate::file_utils::{count_remaining_tasks, delete_completed_tasks, rewrite_todo_file};
 use crate::sync::{cache_sync, SyncState};
 use crate::ui::{launch_log, prompt_energy_state, prompt_mvo_items};
@@ -25,17 +25,69 @@ use crate::ui::{launch_log, prompt_energy_state, prompt_mvo_items};
 fn main() -> Result<()> {
     let cli_args = CliArgs::parse();
 
-    if let Some(CliCommands::Export { days, output }) = cli_args.command {
+    if let Some(CliCommands::Export { days, start, end, output }) = cli_args.command {
         let app_config = load_config()?;
         let mut db_connection = db::init_db(&app_config.logbook_path)?;
 
-        let resolved_days = days.unwrap_or(7);
-        let output_path = output.unwrap_or_else(|| {
-            PathBuf::from(format!("logfine_export_{}_days.json", resolved_days))
-        });
+        let today = Local::now().date_naive();
 
-        export_database_to_json(&mut db_connection, resolved_days, &output_path)?;
-        println!("{COLOR_INFO}Exported the last {} days to:{COLOR_RESET} {:?}", resolved_days, output_path);
+        let (filter, default_filename) = match (days, start, end) {
+            (Some(d), _, _) => (
+                ExportFilter::Days(d),
+                format!("logfine_export_{}_days.json", d),
+            ),
+            (None, Some(s), Some(e)) => {
+                if s > e {
+                    anyhow::bail!("Start date ({}) cannot be after end date ({})", s, e);
+                }
+                (
+                    ExportFilter::Range {
+                        start: Some(s),
+                        end: e,
+                    },
+                    format!("logfine_export_{}_to_{}.json", s, e),
+                )
+            }
+            (None, Some(s), None) => {
+                if s > today {
+                    anyhow::bail!(
+                        "Start date ({}) cannot be after today ({})",
+                        s,
+                        today
+                    );
+                }
+                (
+                    ExportFilter::Range {
+                        start: Some(s),
+                        end: today,
+                    },
+                    format!("logfine_export_{}_to_{}.json", s, today),
+                )
+            }
+            (None, None, Some(e)) => (
+                ExportFilter::Range {
+                    start: None,
+                    end: e,
+                },
+                format!("logfine_export_until_{}.json", e),
+            ),
+            (None, None, None) => {
+                let default_days = 7;
+                (
+                    ExportFilter::Days(default_days),
+                    format!("logfine_export_{}_days.json", default_days),
+                )
+            }
+        };
+
+        let output_path = output.unwrap_or_else(|| PathBuf::from(default_filename));
+
+        let count = export_database_to_json(&mut db_connection, filter, &output_path)?;
+        if count == 0 {
+            println!("{COLOR_WARN}No logs found for the specified date range. No file was created.{COLOR_RESET}");
+        } else {
+            println!("{COLOR_INFO}Exported {} log(s) to:{COLOR_RESET} {:?}", count, output_path);
+        }
         return Ok(());
     }
 
