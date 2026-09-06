@@ -1,9 +1,14 @@
+use std::fs;
+use std::path::Path;
+use anyhow::Result;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use std::path::Path;
-use std::fs;
-use anyhow::Result;
+
+use crate::cli::{COLOR_INFO, COLOR_RESET, COLOR_SUCCESS, COLOR_WARN};
+use crate::models::{LogDb, NewLogDb, NewTaskDb, TaskDb, TodoCacheDb};
+use crate::sync::TaskAction;
+use crate::task::Task;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -11,8 +16,222 @@ pub fn init_db(db_dir: &Path) -> Result<SqliteConnection> {
     fs::create_dir_all(db_dir)?;
     let db_path = db_dir.join("logfine.db");
     let db_url = db_path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid database path"))?;
-    
+
     let mut db_connection = SqliteConnection::establish(db_url)?;
     db_connection.run_pending_migrations(MIGRATIONS).map_err(|e| anyhow::anyhow!("Migration error: {}", e))?;
     Ok(db_connection)
+}
+
+/// Helper function to load or create today's daily log entry in the database
+pub fn get_or_create_log(db_connection: &mut SqliteConnection, date_str: &str) -> Result<LogDb> {
+    use crate::schema::logs::dsl::*;
+
+    let existing = logs
+        .filter(log_date.eq(date_str))
+        .first::<LogDb>(db_connection)
+        .optional()?;
+
+    if let Some(log_db) = existing {
+        Ok(log_db)
+    } else {
+        let new_log = NewLogDb {
+            log_date: date_str,
+            energy: 3,
+            mvos: "[]",
+            worked: "[]",
+            failed: "[]",
+            output: "[]",
+        };
+
+        let log_db = diesel::insert_into(logs)
+            .values(&new_log)
+            .get_result::<LogDb>(db_connection)?;
+
+        Ok(log_db)
+    }
+}
+
+/// Helper function to insert a task into the database associated with a specific daily log
+pub fn insert_db_task(
+    db_connection: &mut SqliteConnection,
+    target_log_id: i32,
+    task: &Task,
+    raw_line_str: &str,
+    is_completed_flag: bool,
+) -> Result<TaskDb> {
+    use crate::schema::tasks::dsl::*;
+    let new_db_task = NewTaskDb {
+        log_id: target_log_id,
+        priority: task.priority.map(|c| c.to_string()),
+        completion_date: task.completion_date.map(|d| d.to_rfc3339()),
+        creation_date: task.creation_date.map(|d| d.to_rfc3339()),
+        project_tag: task.project_tags_json(),
+        context_tag: task.context_tags_json(),
+        key_value_tags: serde_json::to_string(&task.key_value_tags)?,
+        raw_line: raw_line_str,
+        is_completed: is_completed_flag,
+    };
+    Ok(diesel::insert_into(tasks)
+        .values(&new_db_task)
+        .get_result(db_connection)?)
+}
+
+/// Applies all cache and task synchronization changes in a single SQLite transaction
+pub fn apply_sync_updates(
+    db_connection: &mut SqliteConnection,
+    target_log_id: i32,
+    cache_deletes: &[String],
+    cache_inserts: &[String],
+    resolved_actions: Vec<(TaskAction, bool)>,
+) -> Result<()> {
+    db_connection.transaction::<_, anyhow::Error, _>(|conn| {
+        use crate::schema::todo_cache::dsl::*;
+        if !cache_deletes.is_empty() {
+            diesel::delete(todo_cache.filter(raw_line.eq_any(cache_deletes)))
+                .execute(conn)?;
+        }
+        if !cache_inserts.is_empty() {
+            let inserts: Vec<TodoCacheDb> = cache_inserts
+                .iter()
+                .map(|line| TodoCacheDb { raw_line: line.clone() })
+                .collect();
+            diesel::insert_into(todo_cache)
+                .values(&inserts)
+                .execute(conn)?;
+        }
+
+        for (action, is_typo) in resolved_actions {
+            match action {
+                TaskAction::Added { raw_line: added_raw_line, task } => {
+                    let is_completed_flag = added_raw_line.starts_with("x ");
+                    insert_db_task(conn, target_log_id, &task, &added_raw_line, is_completed_flag)?;
+                    println!("{COLOR_WARN}+ New task processed:{COLOR_RESET} {}", added_raw_line);
+                }
+                TaskAction::Completed { old_raw, new_raw, new_task } => {
+                    use crate::schema::tasks::dsl::*;
+                    diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(false))))
+                        .set((
+                            log_id.eq(target_log_id),
+                            priority.eq(new_task.priority.map(|c| c.to_string())),
+                            completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
+                            creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                            project_tag.eq(new_task.project_tags_json()),
+                            context_tag.eq(new_task.context_tags_json()),
+                            key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                            raw_line.eq(&new_raw),
+                            is_completed.eq(true),
+                        ))
+                        .execute(conn)?;
+                    println!("{COLOR_SUCCESS}✓ Task completed:{COLOR_RESET} {}", new_raw);
+                }
+                TaskAction::Reopened { old_raw, new_raw, new_task } => {
+                    use crate::schema::tasks::dsl::*;
+                    diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(true))))
+                        .set((
+                            log_id.eq(target_log_id),
+                            priority.eq(new_task.priority.map(|c| c.to_string())),
+                            completion_date.eq(None::<String>),
+                            creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                            project_tag.eq(new_task.project_tags_json()),
+                            context_tag.eq(new_task.context_tags_json()),
+                            key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                            raw_line.eq(&new_raw),
+                            is_completed.eq(false),
+                        ))
+                        .execute(conn)?;
+                    println!("{COLOR_WARN}↺ Task reopened:{COLOR_RESET} {}", new_raw);
+                }
+                TaskAction::Modified { old_raw, new_raw, new_task } => {
+                    let is_completed_flag = new_raw.starts_with("x ");
+                    if is_typo {
+                        use crate::schema::tasks::dsl::*;
+                        let old_completed = old_raw.starts_with("x ");
+                        diesel::update(tasks.filter(raw_line.eq(&old_raw).and(is_completed.eq(old_completed))))
+                            .set((
+                                priority.eq(new_task.priority.map(|c| c.to_string())),
+                                completion_date.eq(new_task.completion_date.map(|d| d.to_rfc3339())),
+                                creation_date.eq(new_task.creation_date.map(|d| d.to_rfc3339())),
+                                project_tag.eq(new_task.project_tags_json()),
+                                context_tag.eq(new_task.context_tags_json()),
+                                key_value_tags.eq(serde_json::to_string(&new_task.key_value_tags)?),
+                                raw_line.eq(&new_raw),
+                                is_completed.eq(is_completed_flag),
+                            ))
+                            .execute(conn)?;
+                        println!("{COLOR_INFO}~ Log updated.{COLOR_RESET}");
+                    } else {
+                        insert_db_task(conn, target_log_id, &new_task, &new_raw, is_completed_flag)?;
+                        println!("{COLOR_INFO}+ Treated as a new task.{COLOR_RESET}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Updates the energy level of a daily log
+pub fn update_log_energy(
+    db_connection: &mut SqliteConnection,
+    log_id: i32,
+    energy_state: u8,
+) -> Result<()> {
+    use crate::schema::logs::dsl::*;
+    diesel::update(logs.filter(id.eq(log_id)))
+        .set(energy.eq(energy_state as i32))
+        .execute(db_connection)?;
+    Ok(())
+}
+
+/// Updates the MVO items of a daily log
+pub fn update_log_mvos(
+    db_connection: &mut SqliteConnection,
+    log_id: i32,
+    mvo_items: &[String],
+) -> Result<()> {
+    use crate::schema::logs::dsl::*;
+    diesel::update(logs.filter(id.eq(log_id)))
+        .set(mvos.eq(serde_json::to_string(mvo_items)?))
+        .execute(db_connection)?;
+    Ok(())
+}
+
+/// Updates the reflection items (worked, failed, output) of a daily log
+pub fn update_log_reflections(
+    db_connection: &mut SqliteConnection,
+    log_id: i32,
+    worked_items: &[String],
+    failed_items: &[String],
+    output_items: &[String],
+) -> Result<()> {
+    use crate::schema::logs::dsl::*;
+    diesel::update(logs.filter(id.eq(log_id)))
+        .set((
+            worked.eq(serde_json::to_string(worked_items)?),
+            failed.eq(serde_json::to_string(failed_items)?),
+            output.eq(serde_json::to_string(output_items)?),
+        ))
+        .execute(db_connection)?;
+    Ok(())
+}
+
+/// Computes completed and remaining task counts for today's log
+pub fn get_today_task_counts(
+    db_connection: &mut SqliteConnection,
+    target_log_id: i32,
+    formatted_date: &str,
+) -> Result<(i64, i64)> {
+    use crate::schema::tasks::dsl::*;
+    let comp: i64 = tasks
+        .filter(log_id.eq(target_log_id))
+        .filter(is_completed.eq(true))
+        .filter(completion_date.like(format!("{}%", formatted_date)))
+        .count()
+        .get_result(db_connection)?;
+    let rem: i64 = tasks
+        .filter(log_id.eq(target_log_id))
+        .filter(is_completed.eq(false))
+        .count()
+        .get_result(db_connection)?;
+    Ok((comp, rem))
 }
