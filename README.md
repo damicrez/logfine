@@ -4,8 +4,8 @@ A local-first CLI logger designed to generate structured data (JSON) perfect for
 
 ## Features
 
-- Energy, MVOs (Minimum Viable Output) and logbook tracking.
 - todo.txt integration & synchronization.
+- Energy, MVOs (Minimum Viable Output) and logbook tracking.
 - Vim-like keybindings driven workflow.
 - Structured querying & filtering by using a SQLite database.
 - Local-first architecture ensuring offline and private usage.
@@ -13,16 +13,16 @@ A local-first CLI logger designed to generate structured data (JSON) perfect for
 
 ## Why?
 
-The purpose of this program is to help identify patterns by keeping track of daily habits, energy levels, tasks and events.
-**Helping with decision-making and externalizing memory**.
+The purpose of this software is to **quantify** dialy habits, energy levels, tasks, and events.
+So it's much easier to analyse; helping with decision-making and externalizing memory.
 
 ![Program Flow](./flowexample.gif)
 
-Personally, I use this tool **to ask Claude** for patterns, busywork, misalignment between my effort and output, which habits correlate with my highest energy, etc.
+Personally, I use this tool **to ask an AI agent** for patterns, busywork, misalignment between my effort and output, which habits correlate with my highest energy, etc. [Spanish article for Agentic Maintained Reports](https://api.damiandlcp.com/api/assets/136712c5-7b8b-4efa-b5ee-aedadaa53668/AgentMaintainedPersonalInformaticsSystemForPeriodReports.pdf) 
 
-![AI analysis](./logfineclaudeusage.gif)
+![AI analysis](./AgenticUsage.gif)
 
-That's why the data can be exported to JSON and is stored in a database; **Is both human-readable and machine-readable**.
+That's why the data can be exported to JSON: **Is both human-readable and machine-readable**.
 
 ![Database showcase](./sqlexample.gif)
 
@@ -103,6 +103,9 @@ logfine export
 
 # Export the last 30 days to a custom output file
 logfine export 30 -o monthly_report.json
+
+# Export days from 2026-09-01 to 2026-09-14
+logfine export -s 2026-09-01 -e 2026-09-14
 ```
 
 **sync**: Synchronize tasks with the database cache without prompts.
