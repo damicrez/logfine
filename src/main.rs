@@ -120,6 +120,9 @@ fn main() -> Result<()> {
         file_rewrites,
     } = cache_sync(&app_config, &mut db_connection, skip_typos)?;
 
+    // Rewrite modified lines if auto-completion date or formatting was updated
+    rewrite_todo_file(&app_config.todo_path, &file_rewrites)?;
+
     // Apply all updates in a single transaction
     db::apply_sync_updates(
         &mut db_connection,
@@ -128,9 +131,6 @@ fn main() -> Result<()> {
         &cache_inserts,
         sync_actions,
     )?;
-
-    // Rewrite modified lines if auto-completion date or formatting was updated
-    rewrite_todo_file(&app_config.todo_path, &file_rewrites)?;
 
     println!("─────────────────────────────────");
 
