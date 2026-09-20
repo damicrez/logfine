@@ -8,9 +8,7 @@ pub struct LogDb {
     pub log_date: String,
     pub energy: i32,
     pub mvos: String,
-    pub worked: String,
-    pub failed: String,
-    pub output: String,
+    pub reflections: String,
 }
 
 #[derive(Insertable, Debug)]
@@ -19,9 +17,7 @@ pub struct NewLogDb<'a> {
     pub log_date: &'a str,
     pub energy: i32,
     pub mvos: &'a str,
-    pub worked: &'a str,
-    pub failed: &'a str,
-    pub output: &'a str,
+    pub reflections: &'a str,
 }
 
 #[derive(Queryable, Selectable, Identifiable, Associations, Debug, Clone)]

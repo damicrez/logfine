@@ -1,28 +1,28 @@
 # logfine
 
-A local-first CLI logger designed to generate structured data (JSON) perfect for AI analysis and personal trend tracking.
+A local-first CLI logger designed to generate structured JSON data for AI analysis and personal trend tracking.
 
 ## Features
 
-- todo.txt integration & synchronization.
-- Energy, MVOs (Minimum Viable Output) and logbook tracking.
-- Vim-like keybindings driven workflow.
-- Structured querying & filtering by using a SQLite database.
+- Task tracking via todo.txt integration & synchronization.
+- Energy, MVOs (Minimum Viable Outputs) and custom logbook tracking.
+- Vim-like keybinding-driven workflow.
+- Structured querying & filtering via an embedded SQLite database.
 - Local-first architecture ensuring offline and private usage.
-- High performance & memory safety by using Rust and an ORM (via Diesel).
+- High performance & memory safety powered by Rust and Diesel ORM.
 
 ## Why?
 
-The purpose of this software is to **quantify** dialy habits, energy levels, tasks, and events.
-So it's much easier to analyse; helping with decision-making and externalizing memory.
+The purpose of this software is to **quantify** daily habits, energy levels, tasks, and events.
+It makes data easier to analyze, supporting decision-making and externalizing memory.
 
 ![Program Flow](./flowexample.gif)
 
-Personally, I use this tool **to ask an AI agent** for patterns, busywork, misalignment between my effort and output, which habits correlate with my highest energy, etc. [Spanish article for Agentic Maintained Reports](https://api.damiandlcp.com/api/assets/136712c5-7b8b-4efa-b5ee-aedadaa53668/AgentMaintainedPersonalInformaticsSystemForPeriodReports.pdf) 
+Personally, I use this tool **to ask an AI agent** for patterns, busywork, misalignment between my effort and output, which habits correlate with my highest energy, etc. [Article: Agentic Maintained Personal Informatics (Spanish)](https://api.damiandlcp.com/api/assets/136712c5-7b8b-4efa-b5ee-aedadaa53668/AgentMaintainedPersonalInformaticsSystemForPeriodReports.pdf) 
 
 ![AI analysis](./AgenticUsage.gif)
 
-That's why the data can be exported to JSON: **Is both human-readable and machine-readable**.
+That's why the data can be exported to JSON: It is **both human-readable and machine-readable**.
 
 ![Database showcase](./sqlexample.gif)
 
@@ -69,21 +69,23 @@ cargo build --release
 
 ## Configuration
 
-It should be located at your default configuration directory (~/.config/logfine/logfine.toml on Unix-like systems.)
+The configuration file is expected to be located at your default configuration directory (~/.config/logfine/logfine.toml on Unix-like systems.)
 
 Here's an explanation of every configuration item:
 
-**logbook_path**: Directory where a sqlite database will be located.
+**logbook_path:** Directory where a SQLite database will be located.
 
-**todo_path**: Path to your todo.txt file.
+**todo_path:** Path to your todo.txt file.
 
-**mvos**: Is a list of strings with the *Minimum Viable Output* of your day.
+**mvos:** List of strings defining the *Minimum Viable Outputs* for the day.
 
-**delete_tasks**: A true|false variable to delete or not delete the completed tasks in your todo.txt file.
+**delete_tasks:** Boolean (`true`/`false`). If set to `true`, completed tasks are removed from your todo.txt.
 
-**automatic_completion_date**: A true|false configuration variable to append completion dates when a task is marked as completed, helping following the todo.txt format.
+**automatic_completion_date:** Boolean (`true`/`false`) variable to append completion dates when a task is marked as completed, helping maintain todo.txt compliance.
 
-### Example
+**template_path:** Path to a Markdown file to be used as the logbook template. If no file is provided, the default "Worked, Failed & Output" template is used. Supports both bracketed (`[Section]`) and Markdown header (`# Section`) syntax.
+
+### Configuration example
 
 ```toml
 logbook_path = "/home/username/Documents/life/"
@@ -91,6 +93,16 @@ todo_path = "/home/username/Nextcloud/todo.txt"
 mvos = ["Code commit", "Zettelkasten note", "Social exposure"]
 delete_tasks = true
 automatic_completion_date = false
+template_path = "/home/username/.config/logfine/template.md"
+```
+
+### Template example
+
+```markdown
+[Worked with brackets]
+
+# Failed with headers
+
 ```
 
 ## Subcommands

@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{LogDb, TaskDb};
@@ -34,9 +35,7 @@ pub struct ExportedLog {
     pub date: String,
     pub energy: i32,
     pub mvos: Vec<String>,
-    pub worked: Vec<String>,
-    pub failed: Vec<String>,
-    pub output: Vec<String>,
+    pub reflections: IndexMap<String, Vec<String>>,
     pub tasks: Vec<ExportedTask>,
 }
 
@@ -102,17 +101,14 @@ pub fn export_database_to_json(
             .collect();
 
         let mvos_parsed: Vec<String> = serde_json::from_str(&log.mvos).unwrap_or_default();
-        let worked_parsed: Vec<String> = serde_json::from_str(&log.worked).unwrap_or_default();
-        let failed_parsed: Vec<String> = serde_json::from_str(&log.failed).unwrap_or_default();
-        let output_parsed: Vec<String> = serde_json::from_str(&log.output).unwrap_or_default();
+        let reflections_parsed: IndexMap<String, Vec<String>> =
+            serde_json::from_str(&log.reflections).unwrap_or_default();
 
         exported_logs.push(ExportedLog {
             date: log.log_date,
             energy: log.energy,
             mvos: mvos_parsed,
-            worked: worked_parsed,
-            failed: failed_parsed,
-            output: output_parsed,
+            reflections: reflections_parsed,
             tasks: exported_tasks,
         });
     }
@@ -155,9 +151,7 @@ mod tests {
                     log_date: d,
                     energy: 4,
                     mvos: "[\"Exercise\"]",
-                    worked: "[]",
-                    failed: "[]",
-                    output: "[]",
+                    reflections: "{\"What worked\":[\"Exercise\"]}",
                 })
                 .execute(&mut conn)
                 .unwrap();
@@ -196,6 +190,7 @@ mod tests {
         let parsed: Vec<ExportedLog> = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].date, "2026-08-01");
+        assert_eq!(parsed[0].reflections.get("What worked"), Some(&vec!["Exercise".to_string()]));
         assert_eq!(parsed[1].date, "2026-08-15");
         assert_eq!(parsed[1].tasks.len(), 1);
         assert_eq!(parsed[1].tasks[0].raw_line, "(A) Mid-month task");
@@ -232,9 +227,7 @@ mod tests {
                     log_date: d,
                     energy: 3,
                     mvos: "[]",
-                    worked: "[]",
-                    failed: "[]",
-                    output: "[]",
+                    reflections: "{}",
                 })
                 .execute(&mut conn)
                 .unwrap();

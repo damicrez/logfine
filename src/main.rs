@@ -14,9 +14,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::Local;
 use clap::Parser;
+use indexmap::IndexMap;
 
 use crate::cli::{CliArgs, CliCommands, COLOR_INFO, COLOR_RESET, COLOR_SUCCESS, COLOR_WARN};
-use crate::config::load_config;
+use crate::config::{load_config, load_template_sections};
 use crate::export::{export_database_to_json, ExportFilter};
 use crate::file_utils::{count_remaining_tasks, delete_completed_tasks, rewrite_todo_file};
 use crate::sync::{cache_sync, SyncState};
@@ -150,18 +151,11 @@ fn main() -> Result<()> {
         let mvo_items = prompt_mvo_items(&app_config.mvos, &existing_mvos)?;
         db::update_log_mvos(&mut db_connection, log.id, &mvo_items)?;
 
-        let existing_worked: Vec<String> = serde_json::from_str(&log.worked).unwrap_or_default();
-        let existing_failed: Vec<String> = serde_json::from_str(&log.failed).unwrap_or_default();
-        let existing_output: Vec<String> = serde_json::from_str(&log.output).unwrap_or_default();
-        let (worked_items, failed_items, output_items) =
-            launch_log(&existing_worked, &existing_failed, &existing_output)?;
-        db::update_log_reflections(
-            &mut db_connection,
-            log.id,
-            &worked_items,
-            &failed_items,
-            &output_items,
-        )?;
+        let sections = load_template_sections(&app_config.template_path);
+        let existing_reflections: IndexMap<String, Vec<String>> =
+            serde_json::from_str(&log.reflections).unwrap_or_default();
+        let reflection_data = launch_log(&sections, &existing_reflections)?;
+        db::update_log_reflections(&mut db_connection, log.id, &reflection_data)?;
     }
 
     // Query DB for total tasks completed today

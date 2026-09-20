@@ -3,6 +3,8 @@ use edit::{edit_with_builder, Builder};
 use inquire::validator::Validation;
 use inquire::{CustomType, MultiSelect};
 
+use indexmap::IndexMap;
+
 /// Prompt the user to enter their energy state (1-3)
 pub fn prompt_energy_state(default_val: u8) -> Result<u8> {
     let validator = |val: &u8| -> Result<
@@ -43,17 +45,20 @@ pub fn prompt_mvo_items(items: &[String], existing_mvos: &[String]) -> Result<Ve
     Ok(checked)
 }
 
-/// Parses a bracketed section e.g. `[What worked]` from markdown content
+/// Parses a section from markdown content.
+/// Supports both `[Section Name]` and `#+ Section Name` header formats.
 pub fn parse_section(content: &str, section: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut in_section = false;
-    let section_marker = format!("[{}]", section);
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed == section_marker {
+        let is_match = (trimmed.starts_with('[') && trimmed.ends_with(']') && &trimmed[1..trimmed.len() - 1] == section)
+            || (trimmed.starts_with('#') && trimmed.trim_start_matches('#').trim() == section);
+
+        if is_match {
             in_section = true;
-        } else if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        } else if (trimmed.starts_with('[') && trimmed.ends_with(']')) || trimmed.starts_with('#') {
             in_section = false;
         } else if in_section && !trimmed.is_empty() {
             result.push(trimmed.strip_prefix("- ").unwrap_or(trimmed).to_string());
@@ -62,42 +67,28 @@ pub fn parse_section(content: &str, section: &str) -> Vec<String> {
     result
 }
 
-/// Launch default text editor for inputting log details (what worked, failed, output)
+/// Launch default text editor for inputting log details using dynamic sections.
+/// `existing_data` maps section names to their existing entries.
 pub fn launch_log(
-    existing_worked: &[String],
-    existing_failed: &[String],
-    existing_output: &[String],
-) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    sections: &[String],
+    existing_data: &IndexMap<String, Vec<String>>,
+) -> Result<IndexMap<String, Vec<String>>> {
     let mut template = String::new();
 
-    template.push_str("[What worked]\n");
-    if existing_worked.is_empty() {
-        template.push('\n');
-    } else {
-        for item in existing_worked {
-            template.push_str(&format!("- {}\n", item));
+    for section in sections {
+        template.push_str(&format!("[{}]\n", section));
+        if let Some(items) = existing_data.get(section) {
+            if items.is_empty() {
+                template.push('\n');
+            } else {
+                for item in items {
+                    template.push_str(&format!("- {}\n", item));
+                }
+                template.push('\n');
+            }
+        } else {
+            template.push('\n');
         }
-        template.push('\n');
-    }
-
-    template.push_str("[What failed]\n");
-    if existing_failed.is_empty() {
-        template.push('\n');
-    } else {
-        for item in existing_failed {
-            template.push_str(&format!("- {}\n", item));
-        }
-        template.push('\n');
-    }
-
-    template.push_str("[Output]\n");
-    if existing_output.is_empty() {
-        template.push('\n');
-    } else {
-        for item in existing_output {
-            template.push_str(&format!("- {}\n", item));
-        }
-        template.push('\n');
     }
 
     let mut builder = Builder::new();
@@ -105,11 +96,36 @@ pub fn launch_log(
         .prefix("log-")
         .suffix(".md");
     let content = edit_with_builder(&template, &builder)?;
-    Ok((
-        parse_section(&content, "What worked"),
-        parse_section(&content, "What failed"),
-        parse_section(&content, "Output"),
-    ))
+
+    let mut result = IndexMap::new();
+    for section in sections {
+        result.insert(section.clone(), parse_section(&content, section));
+    }
+
+    // Capture any additional sections added by the user
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let found_section = if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() > 2 {
+            Some(trimmed[1..trimmed.len() - 1].to_string())
+        } else if trimmed.starts_with('#') {
+            let s = trimmed.trim_start_matches('#').trim();
+            if !s.is_empty() {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(sec) = found_section {
+            if !result.contains_key(&sec) {
+                result.insert(sec.clone(), parse_section(&content, &sec));
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -125,10 +141,26 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_section_basic() {
+    fn test_parse_section_bracket() {
         let content = "[What worked]\n- Task A\n- Task B\n\n[What failed]\n- Task C\n";
         assert_eq!(parse_section(content, "What worked"), vec!["Task A", "Task B"]);
         assert_eq!(parse_section(content, "What failed"), vec!["Task C"]);
         assert!(parse_section(content, "Output").is_empty());
+    }
+
+    #[test]
+    fn test_parse_section_markdown_heading() {
+        let content = "## What worked\n- Task A\n- Task B\n\n# What failed\n- Task C\n";
+        assert_eq!(parse_section(content, "What worked"), vec!["Task A", "Task B"]);
+        assert_eq!(parse_section(content, "What failed"), vec!["Task C"]);
+        assert!(parse_section(content, "Output").is_empty());
+    }
+
+    #[test]
+    fn test_parse_section_mixed() {
+        let content = "[What worked]\n- Task A\n\n## What failed\n- Task B\n\n### Output\n- Task C\n";
+        assert_eq!(parse_section(content, "What worked"), vec!["Task A"]);
+        assert_eq!(parse_section(content, "What failed"), vec!["Task B"]);
+        assert_eq!(parse_section(content, "Output"), vec!["Task C"]);
     }
 }

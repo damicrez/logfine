@@ -6,9 +6,7 @@ diesel::table! {
         log_date -> Text,
         energy -> Integer,
         mvos -> Text,
-        worked -> Text,
-        failed -> Text,
-        output -> Text,
+        reflections -> Text,
     }
 }
 

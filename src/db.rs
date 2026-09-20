@@ -4,6 +4,7 @@ use anyhow::Result;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use indexmap::IndexMap;
 
 use crate::cli::{COLOR_INFO, COLOR_RESET, COLOR_SUCCESS, COLOR_WARN};
 use crate::models::{LogDb, NewLogDb, NewTaskDb, TaskDb, TodoCacheDb};
@@ -38,9 +39,7 @@ pub fn get_or_create_log(db_connection: &mut SqliteConnection, date_str: &str) -
             log_date: date_str,
             energy: 3,
             mvos: "[]",
-            worked: "[]",
-            failed: "[]",
-            output: "[]",
+            reflections: "{}",
         };
 
         let log_db = diesel::insert_into(logs)
@@ -208,21 +207,15 @@ pub fn update_log_mvos(
     Ok(())
 }
 
-/// Updates the reflection items (worked, failed, output) of a daily log
+/// Updates the reflection sections of a daily log
 pub fn update_log_reflections(
     db_connection: &mut SqliteConnection,
     log_id: i32,
-    worked_items: &[String],
-    failed_items: &[String],
-    output_items: &[String],
+    reflection_data: &IndexMap<String, Vec<String>>,
 ) -> Result<()> {
     use crate::schema::logs::dsl::*;
     diesel::update(logs.filter(id.eq(log_id)))
-        .set((
-            worked.eq(serde_json::to_string(worked_items)?),
-            failed.eq(serde_json::to_string(failed_items)?),
-            output.eq(serde_json::to_string(output_items)?),
-        ))
+        .set(reflections.eq(serde_json::to_string(reflection_data)?))
         .execute(db_connection)?;
     Ok(())
 }
@@ -351,4 +344,80 @@ mod tests {
             "Priority becomes None when reopened without priority"
         );
     }
+
+    #[test]
+    fn test_update_log_reflections_dynamic() {
+        use crate::schema::logs::dsl::*;
+
+        let (mut conn, log) = setup_test_db();
+        let mut reflections_data = IndexMap::new();
+        reflections_data.insert("Logros".to_string(), vec!["Tarea 1".to_string()]);
+        reflections_data.insert("Errores".to_string(), vec!["Bug en prod".to_string()]);
+
+        update_log_reflections(&mut conn, log.id, &reflections_data).unwrap();
+
+        let updated_log = logs.filter(id.eq(log.id)).first::<LogDb>(&mut conn).unwrap();
+        let parsed: IndexMap<String, Vec<String>> = serde_json::from_str(&updated_log.reflections).unwrap();
+        assert_eq!(parsed.get("Logros"), Some(&vec!["Tarea 1".to_string()]));
+        assert_eq!(parsed.get("Errores"), Some(&vec!["Bug en prod".to_string()]));
+    }
+
+    #[test]
+    fn test_migration_reflections_column() {
+        use diesel::connection::SimpleConnection;
+        use crate::schema::logs::dsl::*;
+
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // 1. Create old schema
+        let initial_schema_sql = include_str!("../migrations/00000000000000_create_tables/up.sql");
+        conn.batch_execute(initial_schema_sql).unwrap();
+        conn.batch_execute(
+            r#"
+            INSERT INTO logs (id, log_date, energy, mvos, worked, failed, output)
+            VALUES (1, '2026-09-01', 3, '[]', '["Task 1", "Task 2"]', '["Error 1"]', '["Doc 1"]');
+            INSERT INTO tasks (id, log_id, key_value_tags, raw_line, is_completed)
+            VALUES (1, 1, '{}', 'Task line', 0);
+            "#,
+        ).unwrap();
+
+        // 2. Run new migration
+        let up_sql = include_str!("../migrations/20260919000000_reflections_column/up.sql");
+        conn.batch_execute(up_sql).unwrap();
+
+        // 3. Verify data migrated to reflections
+        let migrated_log = logs.filter(id.eq(1)).first::<LogDb>(&mut conn).unwrap();
+        let parsed: IndexMap<String, Vec<String>> = serde_json::from_str(&migrated_log.reflections).unwrap();
+        assert_eq!(parsed.get("What worked"), Some(&vec!["Task 1".to_string(), "Task 2".to_string()]));
+        assert_eq!(parsed.get("What failed"), Some(&vec!["Error 1".to_string()]));
+        assert_eq!(parsed.get("Output"), Some(&vec!["Doc 1".to_string()]));
+
+        // Verify tasks table data is preserved
+        use crate::schema::tasks::dsl::tasks;
+        let task_count: i64 = tasks.count().get_result(&mut conn).unwrap();
+        assert_eq!(task_count, 1);
+
+        // 4. Test down migration
+        let down_sql = include_str!("../migrations/20260919000000_reflections_column/down.sql");
+        conn.batch_execute(down_sql).unwrap();
+
+        // 5. Verify down migration restores columns
+        #[derive(QueryableByName)]
+        struct OldLog {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            worked: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            failed: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            output: String,
+        }
+        use diesel::sql_query;
+        let old: Vec<OldLog> = sql_query("SELECT worked, failed, output FROM logs")
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].worked, "[\"Task 1\",\"Task 2\"]");
+        assert_eq!(old[0].failed, "[\"Error 1\"]");
+        assert_eq!(old[0].output, "[\"Doc 1\"]");
+    }
 }
+
